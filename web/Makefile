@@ -1,5 +1,5 @@
 .PHONY: dev dev-frontend dev-backend build build-frontend build-dev-picoclaw test lint clean \
-	build-android-arm64 build-android-bundle
+	build-android-arm64 build-android-bundle build-linux-arm
 
 # Go variables
 GO?=go
@@ -20,6 +20,7 @@ BUILD_DIR=build
 EXT=
 OUTPUT?=$(BUILD_DIR)/picoclaw-launcher$(EXT)
 OUTPUT_ANDROID_ARM64?=$(BUILD_DIR)/picoclaw-launcher-android-arm64$(EXT)
+OUTPUT_LINUX_ARM?=$(BUILD_DIR)/picoclaw-launcher-linux-arm
 FRONTEND_DIR=frontend
 FRONTEND_INSTALL_STAMP=$(FRONTEND_DIR)/node_modules/.picoclaw-install-stamp
 BACKEND_DIR=backend
@@ -151,6 +152,11 @@ else
 	@mkdir -p $(BUILD_DIR)
 endif
 	GOOS=android GOARCH=arm64 $(GO) build -tags stdjson -ldflags "$(LDFLAGS)" -o "$(OUTPUT_ANDROID_ARM64)" ./$(BACKEND_DIR)/
+
+# Build launcher for Linux ARMv7 (e.g. Raspberry Pi Zero 2 W 32-bit)
+build-linux-arm: build-frontend
+	@mkdir -p $(BUILD_DIR)
+	GOOS=linux GOARCH=arm GOARM=7 $(GO) build -tags stdjson -ldflags "$(LDFLAGS)" -o "$(OUTPUT_LINUX_ARM)" ./$(BACKEND_DIR)/
 
 # Build launcher for all Android architectures
 build-android-bundle: build-frontend
