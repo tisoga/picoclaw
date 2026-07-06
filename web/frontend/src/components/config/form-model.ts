@@ -2,6 +2,10 @@ export type JsonRecord = Record<string, unknown>
 
 export interface CoreConfigForm {
   workspace: string
+  webhookEnabled: boolean
+  webhookToken: string
+  webhookPath: string
+  webhookAllowedChannelsText: string
   restrictToWorkspace: boolean
   splitOnMarker: boolean
   toolFeedbackEnabled: boolean
@@ -113,6 +117,10 @@ export const DM_SCOPE_OPTIONS = [
 
 export const EMPTY_FORM: CoreConfigForm = {
   workspace: "",
+  webhookEnabled: false,
+  webhookToken: "",
+  webhookPath: "/webhook/send",
+  webhookAllowedChannelsText: "",
   restrictToWorkspace: true,
   splitOnMarker: false,
   toolFeedbackEnabled: false,
@@ -297,6 +305,8 @@ export function buildFormFromConfig(config: unknown): CoreConfigForm {
   const devices = asRecord(root.devices)
   const evolution = asRecord(root.evolution)
   const tools = asRecord(root.tools)
+  const gateway = asRecord(root.gateway)
+  const webhook = asRecord(gateway.webhook)
   const mcp = asRecord(tools.mcp)
   const mcpDiscovery = asRecord(mcp.discovery)
   const cron = asRecord(tools.cron)
@@ -305,6 +315,17 @@ export function buildFormFromConfig(config: unknown): CoreConfigForm {
 
   return {
     workspace: asString(defaults.workspace) || EMPTY_FORM.workspace,
+    webhookEnabled:
+      webhook.enabled === undefined
+        ? EMPTY_FORM.webhookEnabled
+        : asBool(webhook.enabled),
+    webhookToken: "",
+    webhookPath: asString(webhook.path) || EMPTY_FORM.webhookPath,
+    webhookAllowedChannelsText: Array.isArray(webhook.allowed_channels)
+      ? webhook.allowed_channels
+          .filter((value): value is string => typeof value === "string")
+          .join("\n")
+      : EMPTY_FORM.webhookAllowedChannelsText,
     restrictToWorkspace:
       defaults.restrict_to_workspace === undefined
         ? EMPTY_FORM.restrictToWorkspace

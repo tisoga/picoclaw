@@ -1,7 +1,10 @@
 import { IconPlus, IconTrash } from "@tabler/icons-react"
-import { useState } from "react"
+import { IconSend } from "@tabler/icons-react"
+import { useState, type FormEvent } from "react"
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
+import { testWebhook } from "@/api/channels"
 
 import {
   type CoreConfigForm,
@@ -12,7 +15,7 @@ import {
   type TurnProfileForm,
   type TurnProfileMode,
 } from "@/components/config/form-model"
-import { Field, SwitchCardField } from "@/components/shared-form"
+import { Field, KeyInput, SwitchCardField } from "@/components/shared-form"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -21,6 +24,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -1320,6 +1332,183 @@ export function DevicesSection({
         disabled={autoStartDisabled}
         onCheckedChange={onAutoStartChange}
       />
+    </ConfigSectionCard>
+  )
+}
+
+interface WebhookSectionProps {
+  form: CoreConfigForm
+  onFieldChange: UpdateCoreField
+}
+
+export function WebhookSection({ form, onFieldChange }: WebhookSectionProps) {
+  const { t } = useTranslation()
+  const [testDialogOpen, setTestDialogOpen] = useState(false)
+  const [testChannel, setTestChannel] = useState("")
+  const [testChatId, setTestChatId] = useState("")
+  const [testMessage, setTestMessage] = useState("")
+  const [isTesting, setIsTesting] = useState(false)
+
+  const handleTest = async (e: FormEvent) => {
+    e.preventDefault()
+    setIsTesting(true)
+    try {
+      const res = await testWebhook({
+        channel: testChannel,
+        chat_id: testChatId,
+        message: testMessage,
+      })
+      if (res.status_code >= 400) {
+        toast.error(`Test failed: HTTP ${res.status_code}`, {
+          description: res.response,
+        })
+      } else {
+        toast.success("Webhook triggered successfully!", {
+          description: "Message has been dispatched to the channel.",
+        })
+        setTestDialogOpen(false)
+      }
+    } catch (err: unknown) {
+      toast.error("Webhook test failed", {
+        description: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      setIsTesting(false)
+    }
+  }
+
+  return (
+    <ConfigSectionCard
+      title={t("pages.config.sections.webhook", "Webhook")}
+      description={t(
+        "pages.config.webhook_description",
+        "Allow external services to send messages to your channels via HTTP.",
+      )}
+    >
+      <SwitchCardField
+        label={t("pages.config.webhook_enabled", "Enable Webhook")}
+        hint={t(
+          "pages.config.webhook_enabled_hint",
+          "Mount an HTTP endpoint on the gateway to receive messages from external services.",
+        )}
+        checked={form.webhookEnabled}
+        onCheckedChange={(checked) => onFieldChange("webhookEnabled", checked)}
+        ariaLabel="Enable Webhook"
+      />
+
+      {form.webhookEnabled && (
+        <>
+          <Field
+            label={t("pages.config.webhook_token", "Token")}
+            hint={t(
+              "pages.config.webhook_token_hint",
+              "Bearer token for authenticating incoming webhook requests. Leave empty to keep the existing token.",
+            )}
+          >
+            <KeyInput
+              value={form.webhookToken}
+              onChange={(v) => onFieldChange("webhookToken", v)}
+              placeholder="••••••••"
+              aria-label="Webhook token"
+            />
+          </Field>
+
+          <Field
+            label={t("pages.config.webhook_path", "Path")}
+            hint={t(
+              "pages.config.webhook_path_hint",
+              "HTTP path for the webhook endpoint (default: /webhook/send).",
+            )}
+          >
+            <Input
+              value={form.webhookPath}
+              onChange={(e) => onFieldChange("webhookPath", e.target.value)}
+              placeholder="/webhook/send"
+              aria-label="Webhook path"
+            />
+          </Field>
+
+          <Field
+            label={t(
+              "pages.config.webhook_allowed_channels",
+              "Allowed Channels",
+            )}
+            hint={t(
+              "pages.config.webhook_allowed_channels_hint",
+              "One channel name per line. Leave empty to allow all channels.",
+            )}
+          >
+            <Textarea
+              value={form.webhookAllowedChannelsText}
+              onChange={(e) =>
+                onFieldChange("webhookAllowedChannelsText", e.target.value)
+              }
+              placeholder={"telegram\ndiscord\nwhatsapp"}
+              rows={3}
+              className="font-mono text-sm"
+              aria-label="Allowed channels"
+            />
+          </Field>
+
+          <div className="flex justify-end pt-2">
+            <Dialog open={testDialogOpen} onOpenChange={setTestDialogOpen}>
+              <DialogTrigger asChild>
+                <Button variant="secondary" size="sm">
+                  <IconSend className="mr-2 size-4" />
+                  {t("pages.config.webhook_test", "Test Webhook")}
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <form onSubmit={handleTest}>
+                  <DialogHeader>
+                    <DialogTitle>{t("pages.config.webhook_test_title", "Test Webhook")}</DialogTitle>
+                    <DialogDescription>
+                      {t(
+                        "pages.config.webhook_test_desc",
+                        "This will send a real HTTP request to the webhook endpoint, which will relay the message to the target channel. Make sure you saved your config first.",
+                      )}
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="grid gap-4 py-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Channel</label>
+                      <Input
+                        value={testChannel}
+                        onChange={(e) => setTestChannel(e.target.value)}
+                        placeholder="e.g. telegram"
+                        required
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Chat ID</label>
+                      <Input
+                        value={testChatId}
+                        onChange={(e) => setTestChatId(e.target.value)}
+                        placeholder="e.g. 12345678"
+                        required
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Message</label>
+                      <Textarea
+                        value={testMessage}
+                        onChange={(e) => setTestMessage(e.target.value)}
+                        placeholder="Test message from webhook"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button type="submit" disabled={isTesting}>
+                      {isTesting ? "Sending..." : "Send Test"}
+                    </Button>
+                  </DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
+          </div>
+        </>
+      )}
     </ConfigSectionCard>
   )
 }

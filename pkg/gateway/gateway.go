@@ -496,6 +496,8 @@ func setupAndStartServices(
 		runningServices.HealthServer,
 	)
 
+	registerWebhookHandler(cfg.Gateway.Webhook, runningServices.ChannelManager)
+
 	if err = runningServices.ChannelManager.StartAll(context.Background()); err != nil {
 		return nil, fmt.Errorf("error starting channels: %w", err)
 	}
