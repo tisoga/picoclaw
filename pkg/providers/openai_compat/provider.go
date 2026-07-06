@@ -499,7 +499,27 @@ func (p *Provider) Chat(
 		return nil, common.HandleErrorResponse(resp, p.apiBase)
 	}
 
-	return common.ReadAndParseResponse(resp, p.apiBase)
+	br := bufio.NewReader(resp.Body)
+	prefix, _ := br.Peek(256)
+	contentType := resp.Header.Get("Content-Type")
+
+	if common.LooksLikeHTML(prefix, contentType) {
+		return nil, common.WrapHTMLResponseError(resp.StatusCode, prefix, contentType, p.apiBase)
+	}
+
+	// Some proxies (e.g. 9router) always return SSE even for non-streaming requests.
+	// Detect by Content-Type or by body starting with "data:".
+	trimmed := bytes.TrimLeft(prefix, " \t\r\n")
+	if strings.Contains(strings.ToLower(contentType), "text/event-stream") ||
+		bytes.HasPrefix(trimmed, []byte("data:")) {
+		return parseStreamResponse(ctx, br, nil)
+	}
+
+	out, err := common.ParseResponse(br)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse JSON response: %w", err)
+	}
+	return out, nil
 }
 
 // ChatStream implements streaming via OpenAI-compatible SSE (stream: true).
@@ -729,6 +749,7 @@ func parseStreamResponse(
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 1MB initial, 10MB max
 	var eventData strings.Builder
+	var rawFallback strings.Builder // captures non-SSE lines for gateway fallback
 	for scanner.Scan() {
 		// Check for context cancellation between chunks
 		if err := ctx.Err(); err != nil {
@@ -751,6 +772,9 @@ func parseStreamResponse(
 			continue
 		}
 		if !strings.HasPrefix(line, "data:") {
+			// Capture raw lines; some gateways send a non-streaming JSON body
+			// without a "data: " prefix (e.g. OpenRouter proxied through 9router).
+			rawFallback.WriteString(line)
 			continue
 		}
 
@@ -769,6 +793,22 @@ func parseStreamResponse(
 		err := processEvent(eventData.String())
 		if err != nil && err != io.EOF {
 			return nil, err
+		}
+	}
+
+	// Fallback: if no SSE content was collected but we captured raw non-"data:" lines,
+	// the gateway sent a plain JSON body (non-streaming) without SSE framing.
+	// Strip any embedded "data: [DONE]" suffix that some gateways append inline.
+	if textContent.Len() == 0 && len(activeTools) == 0 && rawFallback.Len() > 0 {
+		raw := rawFallback.String()
+		if idx := strings.Index(raw, "data:"); idx >= 0 {
+			raw = raw[:idx]
+		}
+		raw = strings.TrimSpace(raw)
+		if raw != "" {
+			if parsed, parseErr := common.ParseResponse(strings.NewReader(raw)); parseErr == nil {
+				return parsed, nil
+			}
 		}
 	}
 
