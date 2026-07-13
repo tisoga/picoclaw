@@ -1,11 +1,11 @@
 import { IconPlus, IconTrash } from "@tabler/icons-react"
 import { IconSend } from "@tabler/icons-react"
-import { useState, type FormEvent } from "react"
+import { type FormEvent, useState } from "react"
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
-import { testWebhook } from "@/api/channels"
 
+import { testWebhook } from "@/api/channels"
 import {
   type CoreConfigForm,
   DM_SCOPE_OPTIONS,
@@ -1461,7 +1461,9 @@ export function WebhookSection({ form, onFieldChange }: WebhookSectionProps) {
               <DialogContent>
                 <form onSubmit={handleTest}>
                   <DialogHeader>
-                    <DialogTitle>{t("pages.config.webhook_test_title", "Test Webhook")}</DialogTitle>
+                    <DialogTitle>
+                      {t("pages.config.webhook_test_title", "Test Webhook")}
+                    </DialogTitle>
                     <DialogDescription>
                       {t(
                         "pages.config.webhook_test_desc",

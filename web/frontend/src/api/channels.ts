@@ -83,12 +83,17 @@ export async function resetAppConfig(): Promise<ConfigActionResponse> {
   })
 }
 
-export async function testWebhook(payload: Record<string, unknown>): Promise<{ status_code: number; response: string }> {
-  return request<{ status_code: number; response: string }>("/api/config/test-webhook", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  })
+export async function testWebhook(
+  payload: Record<string, unknown>,
+): Promise<{ status_code: number; response: string }> {
+  return request<{ status_code: number; response: string }>(
+    "/api/config/test-webhook",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  )
 }
 
 // WeChat QR login flow API

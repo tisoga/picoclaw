@@ -38,6 +38,7 @@ import (
 	_ "github.com/sipeed/picoclaw/pkg/channels/weixin"
 	_ "github.com/sipeed/picoclaw/pkg/channels/whatsapp"
 	_ "github.com/sipeed/picoclaw/pkg/channels/whatsapp_native"
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/cron"
 	"github.com/sipeed/picoclaw/pkg/devices"
@@ -511,6 +512,9 @@ func setupAndStartServices(
 		voiceAgent := asr.NewAgent(msgBus, transcriber)
 		voiceAgent.Start(vaCtx)
 	}
+
+	// Start background token refresh worker
+	auth.StartRefreshWorker(context.Background())
 
 	healthAddr := net.JoinHostPort(listenResult.ProbeHost, strconv.Itoa(cfg.Gateway.Port))
 	fmt.Printf(

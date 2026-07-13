@@ -15,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	oauthprovider "github.com/sipeed/picoclaw/pkg/providers/oauth"
 )
 
 const (
@@ -85,6 +86,7 @@ type oauthFlow struct {
 	CodeVerifier string
 	OAuthState   string
 	RedirectURI  string
+	AuthURL      string
 	DeviceAuthID string
 	UserCode     string
 	VerifyURL    string
@@ -109,6 +111,7 @@ type oauthFlowResponse struct {
 	Provider  string `json:"provider"`
 	Method    string `json:"method"`
 	Status    string `json:"status"`
+	AuthURL   string `json:"auth_url,omitempty"`
 	ExpiresAt string `json:"expires_at,omitempty"`
 	Error     string `json:"error,omitempty"`
 	UserCode  string `json:"user_code,omitempty"`
@@ -119,9 +122,11 @@ type oauthFlowResponse struct {
 // registerOAuthRoutes binds OAuth login/logout endpoints to the ServeMux.
 func (h *Handler) registerOAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/oauth/providers", h.handleListOAuthProviders)
+	mux.HandleFunc("GET /api/oauth/quota", h.handleGetOAuthQuota)
 	mux.HandleFunc("POST /api/oauth/login", h.handleOAuthLogin)
 	mux.HandleFunc("GET /api/oauth/flows/{id}", h.handleGetOAuthFlow)
 	mux.HandleFunc("POST /api/oauth/flows/{id}/poll", h.handlePollOAuthFlow)
+	mux.HandleFunc("POST /api/oauth/flows/{id}/submit-code", h.handleSubmitOAuthCode)
 	mux.HandleFunc("POST /api/oauth/logout", h.handleOAuthLogout)
 	mux.HandleFunc("GET /oauth/callback", h.handleOAuthCallback)
 }
@@ -285,7 +290,7 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		redirectURI := buildOAuthRedirectURI(r)
+		redirectURI := buildOAuthRedirectURI(cfg)
 		authURL := oauthBuildAuthorizeURL(cfg, pkce, state, redirectURI)
 
 		now := oauthNow()
@@ -300,6 +305,7 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 			CodeVerifier: pkce.CodeVerifier,
 			OAuthState:   state,
 			RedirectURI:  redirectURI,
+			AuthURL:      authURL,
 		}
 		h.storeOAuthFlow(flow)
 
@@ -374,6 +380,73 @@ func (h *Handler) handlePollOAuthFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cred == nil {
+		updated, _ := h.getOAuthFlow(flowID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(flowToResponse(updated))
+		return
+	}
+
+	if err := h.persistCredentialAndConfig(flow.Provider, oauthMethodTokenOrOAuth(flow.Method), cred); err != nil {
+		h.setOAuthFlowError(flowID, fmt.Sprintf("failed to save credential: %v", err))
+		updated, _ := h.getOAuthFlow(flowID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(flowToResponse(updated))
+		return
+	}
+
+	h.setOAuthFlowSuccess(flowID)
+	updated, _ := h.getOAuthFlow(flowID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(flowToResponse(updated))
+}
+
+// handleSubmitOAuthCode handles the paste-code flow: the user opened the auth
+// URL manually, was redirected to /oauth/callback?code=..., and copied the
+// code parameter from the address bar into the UI. We exchange it here using
+// the stored PKCE verifier so the redirect_uri never needs to be reachable.
+func (h *Handler) handleSubmitOAuthCode(w http.ResponseWriter, r *http.Request) {
+	flowID := strings.TrimSpace(r.PathValue("id"))
+	if flowID == "" {
+		http.Error(w, "missing flow id", http.StatusBadRequest)
+		return
+	}
+
+	flow, ok := h.getOAuthFlow(flowID)
+	if !ok {
+		http.Error(w, "flow not found", http.StatusNotFound)
+		return
+	}
+	if flow.Method != oauthMethodBrowser {
+		http.Error(w, "flow does not support code submission", http.StatusBadRequest)
+		return
+	}
+	if flow.Status != oauthFlowPending {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(flowToResponse(flow))
+		return
+	}
+
+	var req struct {
+		Code string `json:"code"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	defer r.Body.Close()
+	if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.Code) == "" {
+		http.Error(w, "field \"code\" is required", http.StatusBadRequest)
+		return
+	}
+	code := strings.TrimSpace(req.Code)
+
+	cfg, err := oauthConfigForProvider(flow.Provider)
+	if err != nil {
+		h.setOAuthFlowError(flowID, err.Error())
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	cred, err := oauthExchangeCodeForTokens(cfg, code, flow.CodeVerifier, flow.RedirectURI)
+	if err != nil {
+		h.setOAuthFlowError(flowID, fmt.Sprintf("token exchange failed: %v", err))
 		updated, _ := h.getOAuthFlow(flowID)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(flowToResponse(updated))
@@ -562,15 +635,10 @@ func oauthMethodTokenOrOAuth(method string) string {
 	return "oauth"
 }
 
-func buildOAuthRedirectURI(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); forwarded != "" {
-		scheme = strings.Split(forwarded, ",")[0]
-	}
-	return fmt.Sprintf("%s://%s/oauth/callback", scheme, r.Host)
+func buildOAuthRedirectURI(cfg auth.OAuthProviderConfig) string {
+	// We must use the EXACT redirect URI configured in the OAuth client.
+	// For CLI/local apps, this is strictly whitelisted to localhost + specific port.
+	return fmt.Sprintf("http://localhost:%d/auth/callback", cfg.Port)
 }
 
 func flowToResponse(flow *oauthFlow) oauthFlowResponse {
@@ -579,6 +647,7 @@ func flowToResponse(flow *oauthFlow) oauthFlowResponse {
 		Provider: flow.Provider,
 		Method:   flow.Method,
 		Status:   flow.Status,
+		AuthURL:  flow.AuthURL,
 		Error:    flow.Error,
 	}
 	if !flow.ExpiresAt.IsZero() {
@@ -830,4 +899,40 @@ func fetchGoogleUserEmail(accessToken string) (string, error) {
 		return "", fmt.Errorf("empty email in userinfo response")
 	}
 	return userInfo.Email, nil
+}
+
+func (h *Handler) handleGetOAuthQuota(w http.ResponseWriter, r *http.Request) {
+	provider := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("provider")))
+	if provider == "antigravity" {
+		provider = oauthProviderGoogleAntigravity
+	}
+
+	if provider != oauthProviderGoogleAntigravity {
+		http.Error(w, "Quota tracking is currently only supported for Google Antigravity", http.StatusBadRequest)
+		return
+	}
+
+	cred, err := oauthGetCredential(provider)
+	if err != nil || cred == nil {
+		http.Error(w, "Not logged in", http.StatusUnauthorized)
+		return
+	}
+
+	// Make sure we have a valid token
+	if cred.IsExpired() {
+		http.Error(w, "Token expired", http.StatusUnauthorized)
+		return
+	}
+
+	// This function uses the same token to fetch models, which returns the quota info.
+	models, err := oauthprovider.FetchAntigravityModels(cred.AccessToken, cred.ProjectID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to fetch quota: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"models": models,
+	})
 }

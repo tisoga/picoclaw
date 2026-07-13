@@ -10,6 +10,7 @@ import {
   loginOAuth,
   logoutOAuth,
   pollOAuthFlow,
+  submitOAuthCode,
 } from "@/api/oauth"
 
 type FlowWatchMode = "" | "status" | "poll"
@@ -37,12 +38,14 @@ export function useCredentialsPage() {
 
   const [openAIToken, setOpenAIToken] = useState("")
   const [anthropicToken, setAnthropicToken] = useState("")
+  const [pasteCode, setPasteCode] = useState("")
 
   const [logoutDialogOpen, setLogoutDialogOpen] = useState(false)
   const [logoutConfirmProvider, setLogoutConfirmProvider] = useState<
     OAuthProvider | ""
   >("")
 
+  const [pasteSheetOpen, setPasteSheetOpen] = useState(false)
   const [deviceSheetOpen, setDeviceSheetOpen] = useState(false)
   const [deviceFlow, setDeviceFlow] = useState<OAuthFlowState | null>(null)
 
@@ -184,45 +187,37 @@ export function useCredentialsPage() {
       const actionToken = bumpActionToken()
       setActiveAction(`${provider}:browser`)
       setError("")
-
-      const authTab = window.open("", "_blank")
-      if (!authTab) {
-        if (!isActionTokenCurrent(actionToken)) {
-          return
-        }
-        setActiveAction("")
-        setError(t("credentials.errors.popupBlocked"))
-        return
-      }
+      setPasteCode("")
 
       try {
         const resp = await loginOAuth({ provider, method: "browser" })
         if (!isActionTokenCurrent(actionToken)) {
-          authTab.close()
           return
         }
         if (!resp.auth_url || !resp.flow_id) {
           throw new Error(t("credentials.errors.invalidBrowserResponse"))
         }
 
-        authTab.location.href = resp.auth_url
+        // Open the auth URL in a new tab. The user completes OAuth there,
+        // then pastes the authorization code back into the UI.
+        window.open(resp.auth_url, "_blank", "noopener,noreferrer")
 
         setActiveFlow({
           flow_id: resp.flow_id,
           provider,
           method: "browser",
           status: "pending",
+          auth_url: resp.auth_url,
           expires_at: resp.expires_at,
         })
-        setWatchFlowID(resp.flow_id)
-        setWatchMode("status")
-        setPollIntervalMs(2000)
+        // Don't start polling — we wait for the user to paste the code.
+        setPasteSheetOpen(true)
+        // Clear active action so the Submit button in the sheet isn't disabled
+        setActiveAction("")
       } catch (err) {
         if (!isActionTokenCurrent(actionToken)) {
-          authTab.close()
           return
         }
-        authTab.close()
         setActiveAction("")
         setError(
           err instanceof Error
@@ -232,6 +227,69 @@ export function useCredentialsPage() {
       }
     },
     [bumpActionToken, isActionTokenCurrent, t],
+  )
+
+  const submitPastedCode = useCallback(
+    async (provider: OAuthProvider) => {
+      let finalCode = pasteCode.trim()
+      if (!activeFlow?.flow_id || !finalCode) {
+        return
+      }
+
+      // If the user pasted the entire URL, extract the "code" query param
+      if (finalCode.startsWith("http://") || finalCode.startsWith("https://")) {
+        try {
+          const url = new URL(finalCode)
+          const codeParam = url.searchParams.get("code")
+          if (codeParam) {
+            finalCode = codeParam
+          }
+        } catch {
+          // Ignore invalid URL errors, just send the raw text
+        }
+      }
+
+      const actionToken = bumpActionToken()
+      setActiveAction(`${provider}:browser-submit`)
+      setError("")
+
+      try {
+        const flow = await submitOAuthCode(activeFlow.flow_id, finalCode)
+        if (!isActionTokenCurrent(actionToken)) {
+          return
+        }
+        setActiveFlow(flow)
+        setPasteCode("")
+        if (flow.status === "success") {
+          setWatchFlowID("")
+          setWatchMode("")
+          setActiveAction("")
+          setPasteSheetOpen(false)
+          await loadProviders()
+        } else {
+          setActiveAction("")
+          setError(flow.error ?? t("credentials.errors.loginFailed"))
+        }
+      } catch (err) {
+        if (!isActionTokenCurrent(actionToken)) {
+          return
+        }
+        setActiveAction("")
+        setError(
+          err instanceof Error
+            ? err.message
+            : t("credentials.errors.loginFailed"),
+        )
+      }
+    },
+    [
+      activeFlow,
+      bumpActionToken,
+      isActionTokenCurrent,
+      loadProviders,
+      pasteCode,
+      t,
+    ],
   )
 
   const startOpenAIDeviceCode = useCallback(async () => {
@@ -352,6 +410,28 @@ export function useCredentialsPage() {
     }
   }, [])
 
+  const handlePasteSheetOpenChange = useCallback(
+    (open: boolean) => {
+      setPasteSheetOpen(open)
+      if (open) {
+        return
+      }
+
+      setWatchFlowID("")
+      setWatchMode("")
+      setPasteCode("")
+
+      if (activeFlow?.method === "browser" && activeFlow.status === "pending") {
+        setActiveFlow(null)
+      }
+
+      if (activeAction.endsWith(":browser")) {
+        setActiveAction("")
+      }
+    },
+    [activeAction, activeFlow],
+  )
+
   const handleDeviceSheetOpenChange = useCallback(
     (open: boolean) => {
       setDeviceSheetOpen(open)
@@ -384,7 +464,9 @@ export function useCredentialsPage() {
     setWatchMode("")
     setActiveAction("")
     setDeviceSheetOpen(false)
+    setPasteSheetOpen(false)
     setDeviceFlow(null)
+    setPasteCode("")
     setActiveFlow((prev) => (prev?.status === "pending" ? null : prev))
   }, [bumpActionToken])
 
@@ -414,6 +496,7 @@ export function useCredentialsPage() {
     flowHint,
     openAIToken,
     anthropicToken,
+    pasteCode,
     openaiStatus,
     anthropicStatus,
     antigravityStatus,
@@ -422,15 +505,19 @@ export function useCredentialsPage() {
     logoutProviderLabel,
     deviceSheetOpen,
     deviceFlow,
+    pasteSheetOpen,
     setOpenAIToken,
     setAnthropicToken,
+    setPasteCode,
     startBrowserOAuth,
     startOpenAIDeviceCode,
     stopLoading,
     saveToken,
+    submitPastedCode,
     askLogout,
     handleConfirmLogout,
     handleLogoutDialogOpenChange,
     handleDeviceSheetOpenChange,
+    handlePasteSheetOpenChange,
   }
 }

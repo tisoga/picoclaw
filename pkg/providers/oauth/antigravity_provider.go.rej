@@ -1,0 +1,41 @@
+--- antigravity_provider.go
++++ antigravity_provider.go
+@@ -75,11 +75,13 @@
+ 	// Build the inner Gemini-format request
+ 	innerRequest := p.buildRequest(messages, tools, model, options)
+ 
+ 	// Wrap in v1internal envelope (matches pi-ai SDK format)
++	sessionID := fmt.Sprintf("session-%d-%s", time.Now().UnixMilli(), randomString(9))
+ 	envelope := map[string]any{
+ 		"project":     projectID,
+ 		"model":       model,
+ 		"request":     innerRequest,
+ 		"requestType": "agent",
++		"sessionId":   sessionID,
+ 		"userAgent":   antigravityUserAgent,
+ 		"requestId":   fmt.Sprintf("agent-%d-%s", time.Now().UnixMilli(), randomString(9)),
+--- /dev/null
++++ /dev/null
+@@ -92,16 +94,17 @@
+ 	if err != nil {
+ 		return nil, fmt.Errorf("creating request: %w", err)
+ 	}
+ 
+ 	// Headers matching the pi-ai SDK antigravity format
+-	clientMetadata, _ := json.Marshal(map[string]string{
+-		"ideType":    "IDE_UNSPECIFIED",
+-		"platform":   "PLATFORM_UNSPECIFIED",
+-		"pluginType": "GEMINI",
++	clientMetadata, _ := json.Marshal(map[string]any{
++		"ideType":    9, // GENERIC_IDE
++		"platform":   2, // LINUX
++		"pluginType": 2, // GEMINI_CLOUD_CODE
+ 	})
+ 	req.Header.Set("Authorization", "Bearer "+accessToken)
+ 	req.Header.Set("Content-Type", "application/json")
+ 	req.Header.Set("Accept", "text/event-stream")
+-	req.Header.Set("User-Agent", fmt.Sprintf("antigravity/%s linux/amd64", antigravityVersion))
++	req.Header.Set("User-Agent", "google-api-nodejs-client/9.15.1")
+ 	req.Header.Set("X-Goog-Api-Client", antigravityXGoogClient)
+ 	req.Header.Set("Client-Metadata", string(clientMetadata))
++	req.Header.Set("X-Machine-Session-Id", sessionID)

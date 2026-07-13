@@ -71,17 +71,17 @@ func (p *AntigravityProvider) Chat(
 		"requestId": fmt.Sprintf("agent-%d-%s", time.Now().UnixMilli(), randomString(9)),
 	})
 
+	// Build the inner Gemini-format request
+	innerRequest := p.buildRequest(messages, tools, model, options)
+
 	// Wrap in v1internal envelope (matches pi-ai SDK format)
 	sessionID := fmt.Sprintf("session-%d-%s", time.Now().UnixMilli(), randomString(9))
-
-	// Build the inner Gemini-format request
-	innerRequest := p.buildRequest(messages, tools, model, options, sessionID)
-
 	envelope := map[string]any{
 		"project":     projectID,
 		"model":       model,
 		"request":     innerRequest,
 		"requestType": "agent",
+		"sessionId":   sessionID,
 		"userAgent":   antigravityUserAgent,
 		"requestId":   fmt.Sprintf("agent-%d-%s", time.Now().UnixMilli(), randomString(9)),
 	}
@@ -92,8 +92,7 @@ func (p *AntigravityProvider) Chat(
 	}
 
 	// Build API URL — uses Cloud Code Assist v1internal streaming endpoint
-	// 9router: use daily-cloudcode-pa for generation to avoid 429 rate limits
-	apiURL := "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+	apiURL := fmt.Sprintf("%s/v1internal:streamGenerateContent?alt=sse", antigravityBaseURL)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
@@ -101,18 +100,17 @@ func (p *AntigravityProvider) Chat(
 	}
 
 	// Headers matching the pi-ai SDK antigravity format
-	clientMetadata, _ := json.Marshal(map[string]any{
-		"ideType":    9, // GENERIC_IDE
-		"platform":   2, // LINUX
-		"pluginType": 2, // GEMINI_CLOUD_CODE
+	clientMetadata, _ := json.Marshal(map[string]string{
+		"ideType":    "IDE_UNSPECIFIED",
+		"platform":   "PLATFORM_UNSPECIFIED",
+		"pluginType": "GEMINI",
 	})
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("User-Agent", "google-api-nodejs-client/9.15.1")
+	req.Header.Set("User-Agent", fmt.Sprintf("antigravity/%s linux/amd64", antigravityVersion))
 	req.Header.Set("X-Goog-Api-Client", antigravityXGoogClient)
 	req.Header.Set("Client-Metadata", string(clientMetadata))
-	req.Header.Set("X-Machine-Session-Id", sessionID)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -160,12 +158,10 @@ func (p *AntigravityProvider) GetDefaultModel() string {
 // --- Request building ---
 
 type antigravityRequest struct {
-	SessionID    string                   `json:"sessionId,omitempty"`
 	Contents     []antigravityContent     `json:"contents"`
 	Tools        []antigravityTool        `json:"tools,omitempty"`
 	SystemPrompt *antigravitySystemPrompt `json:"systemInstruction,omitempty"`
 	Config       *antigravityGenConfig    `json:"generationConfig,omitempty"`
-	ToolConfig   *antigravityToolConfig   `json:"toolConfig,omitempty"`
 }
 
 type antigravityContent struct {
@@ -210,22 +206,13 @@ type antigravityGenConfig struct {
 	Temperature     float64 `json:"temperature,omitempty"`
 }
 
-type antigravityToolConfig struct {
-	FunctionCallingConfig struct {
-		Mode string `json:"mode"`
-	} `json:"functionCallingConfig"`
-}
-
 func (p *AntigravityProvider) buildRequest(
 	messages []Message,
 	tools []ToolDefinition,
 	model string,
 	options map[string]any,
-	sessionID string,
 ) antigravityRequest {
-	req := antigravityRequest{
-		SessionID: sessionID,
-	}
+	req := antigravityRequest{}
 	toolCallNames := make(map[string]string)
 
 	// Build contents from messages
@@ -238,25 +225,6 @@ func (p *AntigravityProvider) buildRequest(
 		case "user":
 			if msg.ToolCallID != "" {
 				toolName := common.ResolveToolResponseName(msg.ToolCallID, toolCallNames)
-
-				// Apply same cloak logic to responses
-				isNative := false
-				for _, nativeName := range []string{
-					"browser_subagent", "command_status", "find_by_name", "generate_image",
-					"grep_search", "list_dir", "list_resources", "multi_replace_file_content",
-					"notify_user", "read_resource", "read_terminal", "read_url_content",
-					"replace_file_content", "run_command", "search_web", "send_command_input",
-					"task_boundary", "view_content_chunk", "view_file", "write_to_file",
-				} {
-					if toolName == nativeName {
-						isNative = true
-						break
-					}
-				}
-
-				if !isNative && !strings.HasSuffix(toolName, "_ide") {
-					toolName += "_ide"
-				}
 				// Tool result
 				req.Contents = append(req.Contents, antigravityContent{
 					Role: "user",
@@ -294,31 +262,6 @@ func (p *AntigravityProvider) buildRequest(
 					)
 					continue
 				}
-				
-				// 9router: Gemini 3 crashes if a tool call has no thoughtSignature. Backfill.
-				if thoughtSignature == "" {
-					thoughtSignature = "Thinking..."
-				}
-
-					// 9router: Append _ide to tool names to match decoy pattern
-					isNative := false
-					for _, nativeName := range []string{
-						"browser_subagent", "command_status", "find_by_name", "generate_image",
-						"grep_search", "list_dir", "list_resources", "multi_replace_file_content",
-						"notify_user", "read_resource", "read_terminal", "read_url_content",
-						"replace_file_content", "run_command", "search_web", "send_command_input",
-						"task_boundary", "view_content_chunk", "view_file", "write_to_file",
-					} {
-						if toolName == nativeName {
-							isNative = true
-							break
-						}
-					}
-
-					if !isNative {
-						toolName = toolName + "_ide"
-					}
-
 				if tc.ID != "" {
 					toolCallNames[tc.ID] = toolName
 				}
@@ -336,9 +279,6 @@ func (p *AntigravityProvider) buildRequest(
 			}
 		case "tool":
 			toolName := common.ResolveToolResponseName(msg.ToolCallID, toolCallNames)
-					if !strings.HasSuffix(toolName, "_ide") {
-						toolName += "_ide"
-					}
 			req.Contents = append(req.Contents, antigravityContent{
 				Role: "user",
 				Parts: []antigravityPart{{
@@ -356,64 +296,18 @@ func (p *AntigravityProvider) buildRequest(
 	// Build tools
 	if len(tools) > 0 {
 		var funcDecls []antigravityFuncDecl
-		existingTools := make(map[string]bool)
 		for _, t := range tools {
 			if t.Type != "function" {
 				continue
 			}
-
-			// Don't append _ide to AG defaults so they don't clash with the decoys
-			toolName := t.Function.Name
-
-			// If not a native tool, cloak it
-			isNative := false
-			for _, nativeName := range []string{
-				"browser_subagent", "command_status", "find_by_name", "generate_image",
-				"grep_search", "list_dir", "list_resources", "multi_replace_file_content",
-				"notify_user", "read_resource", "read_terminal", "read_url_content",
-				"replace_file_content", "run_command", "search_web", "send_command_input",
-				"task_boundary", "view_content_chunk", "view_file", "write_to_file",
-			} {
-				if toolName == nativeName {
-					isNative = true
-					break
-				}
-			}
-
-			if !isNative {
-				toolName += "_ide"
-			}
-
-			existingTools[toolName] = true
 			funcDecls = append(funcDecls, antigravityFuncDecl{
-				Name:        toolName,
+				Name:        t.Function.Name,
 				Description: t.Function.Description,
 				Parameters:  t.Function.Parameters,
 			})
 		}
-
-		// 9router: Inject 21 decoy tools to look like a native IDE
-		decoyNames := []string{
-			"browser_subagent", "command_status", "find_by_name", "generate_image",
-			"grep_search", "list_dir", "list_resources", "multi_replace_file_content",
-			"notify_user", "read_resource", "read_terminal", "read_url_content",
-			"replace_file_content", "run_command", "search_web", "send_command_input",
-			"task_boundary", "view_content_chunk", "view_file", "write_to_file",
-		}
-		for _, name := range decoyNames {
-			if !existingTools[name] {
-				funcDecls = append(funcDecls, antigravityFuncDecl{
-					Name:        name,
-					Description: "This tool is currently unavailable.",
-					Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
-				})
-			}
-		}
-
 		if len(funcDecls) > 0 {
 			req.Tools = []antigravityTool{{FunctionDeclarations: funcDecls}}
-			req.ToolConfig = &antigravityToolConfig{}
-			req.ToolConfig.FunctionCallingConfig.Mode = "VALIDATED"
 		}
 	}
 
@@ -496,14 +390,13 @@ func (p *AntigravityProvider) parseSSEResponse(body string) (*LLMResponse, error
 					}
 				}
 				if part.FunctionCall != nil {
-					name := strings.TrimSuffix(part.FunctionCall.Name, "_ide")
 					argumentsJSON, _ := json.Marshal(part.FunctionCall.Args)
 					toolCalls = append(toolCalls, ToolCall{
-						ID:        fmt.Sprintf("call_%s_%d", name, time.Now().UnixNano()),
-						Name:      name,
+						ID:        fmt.Sprintf("call_%s_%d", part.FunctionCall.Name, time.Now().UnixNano()),
+						Name:      part.FunctionCall.Name,
 						Arguments: part.FunctionCall.Args,
 						Function: &FunctionCall{
-							Name:      name,
+							Name:      part.FunctionCall.Name,
 							Arguments: string(argumentsJSON),
 							ThoughtSignature: extractPartThoughtSignature(
 								part.ThoughtSignature,
@@ -593,23 +486,18 @@ func createAntigravityTokenSource() func() (string, string, error) {
 
 		projectID := cred.ProjectID
 		if projectID == "" {
-			// Fetch project ID and Onboard
+			// Try to fetch project ID from API
 			fetchedID, err := FetchAntigravityProjectID(cred.AccessToken)
 			if err != nil {
-				return "", "", fmt.Errorf("failed to fetch project ID: %w. Your Google account may not be eligible for Gemini Code Assist", err)
-			}
-			
-			// 9router: Explicitly onboard the user. If we don't do this, chat requests will fail
-			// with "project not onboarded" errors.
-			if err := OnboardAntigravityUser(cred.AccessToken, fetchedID); err != nil {
-				logger.WarnCF("provider.antigravity", "Onboarding returned an error, but continuing anyway", map[string]any{
+				logger.WarnCF("provider.antigravity", "Could not fetch project ID, using fallback", map[string]any{
 					"error": err.Error(),
 				})
+				projectID = "rising-fact-p41fc" // Default fallback (same as OpenCode)
+			} else {
+				projectID = fetchedID
+				cred.ProjectID = projectID
+				_ = auth.SetCredential("google-antigravity", cred)
 			}
-
-			projectID = fetchedID
-			cred.ProjectID = projectID
-			_ = auth.SetCredential("google-antigravity", cred)
 		}
 
 		return cred.AccessToken, projectID, nil
@@ -714,57 +602,44 @@ func FetchAntigravityModels(accessToken, projectID string) ([]AntigravityModelIn
 
 	var models []AntigravityModelInfo
 	for id, info := range result.Models {
-		var fraction float64
-		switch v := info.QuotaInfo.RemainingFraction.(type) {
-		case float64:
-			fraction = v
-		case string:
-			fmt.Sscanf(v, "%f", &fraction)
-		}
-
 		models = append(models, AntigravityModelInfo{
-			ID:                id,
-			DisplayName:       info.DisplayName,
-			IsExhausted:       info.QuotaInfo.IsExhausted,
-			RemainingFraction: fraction,
-			ResetTime:         info.QuotaInfo.ResetTime,
+			ID:          id,
+			DisplayName: info.DisplayName,
+			IsExhausted: info.QuotaInfo.IsExhausted,
 		})
 	}
 
-	// Inject 9router standard and experimental aliases if not returned by API
-	nineRouterModels := []AntigravityModelInfo{
-		{ID: "gemini-3-flash-agent", DisplayName: "Gemini 3.5 Flash (High)"},
-		{ID: "gemini-3.5-flash-low", DisplayName: "Gemini 3.5 Flash (Medium)"},
-		{ID: "gemini-3.5-flash-extra-low", DisplayName: "Gemini 3.5 Flash (Low)"},
-		{ID: "gemini-pro-agent", DisplayName: "Gemini 3.1 Pro (High)"},
-		{ID: "gemini-3.1-pro-low", DisplayName: "Gemini 3.1 Pro (Low)"},
-		{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6 (Thinking)"},
-		{ID: "claude-opus-4-6-thinking", DisplayName: "Claude Opus 4.6 (Thinking)"},
-		{ID: "gpt-oss-120b-medium", DisplayName: "GPT-OSS 120B (Medium)"},
-		{ID: "gemini-3-flash", DisplayName: "Gemini 3 Flash"},
-		{ID: "gemini-1.5-pro", DisplayName: "Gemini 1.5 Pro"},
-	}
-
-	existingModels := make(map[string]bool)
+	// Ensure gemini-3-flash-preview and gemini-3-flash are in the list if they aren't already
+	hasFlashPreview := false
+	hasFlash := false
 	for _, m := range models {
-		existingModels[m.ID] = true
-	}
-
-	for _, m := range nineRouterModels {
-		if !existingModels[m.ID] {
-			models = append(models, m)
+		if m.ID == "gemini-3-flash-preview" {
+			hasFlashPreview = true
 		}
+		if m.ID == "gemini-3-flash" {
+			hasFlash = true
+		}
+	}
+	if !hasFlashPreview {
+		models = append(models, AntigravityModelInfo{
+			ID:          "gemini-3-flash-preview",
+			DisplayName: "Gemini 3 Flash (Preview)",
+		})
+	}
+	if !hasFlash {
+		models = append(models, AntigravityModelInfo{
+			ID:          "gemini-3-flash",
+			DisplayName: "Gemini 3 Flash",
+		})
 	}
 
 	return models, nil
 }
 
 type AntigravityModelInfo struct {
-	ID                string  `json:"id"`
-	DisplayName       string  `json:"display_name"`
-	IsExhausted       bool    `json:"is_exhausted"`
-	RemainingFraction float64 `json:"remaining_fraction"`
-	ResetTime         string  `json:"reset_time"`
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	IsExhausted bool   `json:"is_exhausted"`
 }
 
 // --- Helpers ---
@@ -815,43 +690,4 @@ func (p *AntigravityProvider) parseAntigravityError(statusCode int, body []byte)
 	}
 
 	return fmt.Errorf("antigravity API error (%s): %s", errResp.Error.Status, msg)
-}
-
-// OnboardAntigravityUser hits the v1internal:onboardUser endpoint to provision the account.
-func OnboardAntigravityUser(accessToken, projectID string) error {
-	reqBody, _ := json.Marshal(map[string]any{
-		"project": projectID,
-	})
-
-	req, err := http.NewRequest("POST", antigravityBaseURL+"/v1internal:onboardUser", bytes.NewReader(reqBody))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "google-api-nodejs-client/9.15.1")
-	req.Header.Set("X-Goog-Api-Client", antigravityXGoogClient)
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	
-	// 9router polls this endpoint up to 10 times to ensure provisioning finishes
-	for i := 0; i < 5; i++ {
-		resp, err := client.Do(req)
-		if err != nil {
-			return err
-		}
-		
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		
-		if resp.StatusCode == http.StatusOK {
-			return nil
-		}
-		
-		if i == 4 {
-			return fmt.Errorf("onboardUser failed after 5 retries: HTTP %d: %s", resp.StatusCode, string(body))
-		}
-		time.Sleep(2 * time.Second)
-	}
-	return nil
 }

@@ -21,6 +21,7 @@ export interface OAuthFlowState {
   provider: OAuthProvider
   method: OAuthMethod
   status: "pending" | "success" | "error" | "expired"
+  auth_url?: string
   expires_at?: string
   error?: string
   user_code?: string
@@ -99,6 +100,20 @@ export async function logoutOAuth(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider }),
+    },
+  )
+}
+
+export async function submitOAuthCode(
+  flowID: string,
+  code: string,
+): Promise<OAuthFlowState> {
+  return request<OAuthFlowState>(
+    `/api/oauth/flows/${encodeURIComponent(flowID)}/submit-code`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
     },
   )
 }
