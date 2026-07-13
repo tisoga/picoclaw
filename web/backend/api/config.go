@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ func (h *Handler) registerConfigRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/config", h.handlePatchConfig)
 	mux.HandleFunc("POST /api/config/reset", h.handleResetConfig)
 	mux.HandleFunc("POST /api/config/test-command-patterns", h.handleTestCommandPatterns)
+	mux.HandleFunc("POST /api/config/test-webhook", h.handleTestWebhook)
 }
 
 func (h *Handler) applyRuntimeLogLevel() {
@@ -817,4 +819,53 @@ func applySecureStringsToStruct(rv reflect.Value, rawMap map[string]any) {
 			}
 		}
 	}
+}
+
+// handleTestWebhook sends a test request to the gateway's webhook endpoint
+// using the currently saved config.
+//
+//	POST /api/config/test-webhook
+func (h *Handler) handleTestWebhook(w http.ResponseWriter, r *http.Request) {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		http.Error(w, "Failed to load config", http.StatusInternalServerError)
+		return
+	}
+	if !cfg.Gateway.Webhook.Enabled {
+		http.Error(w, "Webhook is not enabled in config", http.StatusBadRequest)
+		return
+	}
+
+	var payload map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	port := cfg.Gateway.Port
+	if port == 0 {
+		port = 18790 // Default port
+	}
+	path := cfg.Gateway.Webhook.EffectiveWebhookPath()
+	url := fmt.Sprintf("http://localhost:%d%s", port, path)
+
+	body, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
+	req.Header.Set("Authorization", "Bearer "+cfg.Gateway.Webhook.Token.String())
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "Failed to send request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"status_code": resp.StatusCode,
+		"response":    string(respBody),
+	})
 }

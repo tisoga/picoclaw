@@ -9,6 +9,7 @@ import { AntigravityCredentialCard } from "./antigravity-credential-card"
 import { DeviceCodeSheet } from "./device-code-sheet"
 import { LogoutConfirmDialog } from "./logout-confirm-dialog"
 import { OpenAICredentialCard } from "./openai-credential-card"
+import { PasteCodeSheet } from "./paste-code-sheet"
 
 export function CredentialsPage() {
   const { t } = useTranslation()
@@ -20,6 +21,7 @@ export function CredentialsPage() {
     flowHint,
     openAIToken,
     anthropicToken,
+    pasteCode,
     openaiStatus,
     anthropicStatus,
     antigravityStatus,
@@ -28,16 +30,20 @@ export function CredentialsPage() {
     logoutProviderLabel,
     deviceSheetOpen,
     deviceFlow,
+    pasteSheetOpen,
     setOpenAIToken,
     setAnthropicToken,
+    setPasteCode,
     startBrowserOAuth,
     startOpenAIDeviceCode,
     stopLoading,
     saveToken,
+    submitPastedCode,
     askLogout,
     handleConfirmLogout,
     handleLogoutDialogOpenChange,
     handleDeviceSheetOpenChange,
+    handlePasteSheetOpenChange,
   } = useCredentialsPage()
 
   return (
@@ -121,6 +127,21 @@ export function CredentialsPage() {
         flow={deviceFlow}
         flowHint={flowHint}
         onOpenChange={handleDeviceSheetOpenChange}
+      />
+
+      <PasteCodeSheet
+        open={pasteSheetOpen}
+        flow={activeFlow?.method === "browser" ? activeFlow : null}
+        pasteCode={pasteCode}
+        actionBusy={activeAction.includes("browser-submit")}
+        flowHint={flowHint}
+        onPasteCodeChange={setPasteCode}
+        onSubmit={() => {
+          if (activeFlow?.provider) {
+            void submitPastedCode(activeFlow.provider)
+          }
+        }}
+        onOpenChange={handlePasteSheetOpenChange}
       />
     </div>
   )

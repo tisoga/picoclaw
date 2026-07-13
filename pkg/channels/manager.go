@@ -2034,6 +2034,15 @@ func (m *Manager) UnregisterChannel(name string) {
 	delete(m.channels, name)
 }
 
+// HandleFunc registers an arbitrary HTTP handler on the shared gateway mux.
+// This allows non-channel components (e.g. gateway webhook) to serve HTTP
+// on the same listener. Must be called after SetupHTTPServerListeners.
+func (m *Manager) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	if m.mux != nil {
+		m.mux.HandleFunc(pattern, handler)
+	}
+}
+
 // SendMessage sends an outbound message synchronously through the channel
 // worker's rate limiter and retry logic. It blocks until the message is
 // delivered (or all retries are exhausted), which preserves ordering when

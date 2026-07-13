@@ -25,6 +25,7 @@ import {
   LauncherSection,
   MCPSection,
   RuntimeSection,
+  WebhookSection,
 } from "@/components/config/config-sections"
 import {
   type CoreConfigForm,
@@ -632,6 +633,18 @@ export function ConfigPage() {
             enabled: form.devicesEnabled,
             monitor_usb: form.monitorUSB,
           },
+          gateway: {
+            webhook: {
+              enabled: form.webhookEnabled,
+              ...(form.webhookToken.trim() !== ""
+                ? { token: form.webhookToken.trim() }
+                : {}),
+              path: form.webhookPath.trim() || "/webhook/send",
+              allowed_channels: parseMultilineList(
+                form.webhookAllowedChannelsText,
+              ),
+            },
+          },
         })
 
         setBaseline(form)
@@ -833,6 +846,8 @@ export function ConfigPage() {
               <ExecSection form={form} onFieldChange={updateField} />
 
               <CronSection form={form} onFieldChange={updateField} />
+
+              <WebhookSection form={form} onFieldChange={updateField} />
 
               <DevicesSection
                 form={form}

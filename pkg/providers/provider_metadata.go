@@ -288,6 +288,7 @@ var modelProviderOptionsByName = map[string]ModelProviderOption{
 	"antigravity": {
 		ID:                  "antigravity",
 		DisplayName:         "Google Code Assist",
+		IconSlug:            "google",
 		Domain:              "antigravity.google",
 		EmptyAPIKeyAllowed:  true,
 		CreateAllowed:       true,
@@ -295,7 +296,19 @@ var modelProviderOptionsByName = map[string]ModelProviderOption{
 		DefaultAuthMethod:   "oauth",
 		AuthMethodLocked:    true,
 		Priority:            54,
-		Aliases:             []string{"google-antigravity"},
+		CommonModels: []string{
+			"gemini-3-flash-agent",
+			"gemini-3.5-flash-low",
+			"gemini-3.5-flash-extra-low",
+			"gemini-pro-agent",
+			"gemini-3.1-pro-low",
+			"claude-sonnet-4-6",
+			"claude-opus-4-6-thinking",
+			"gpt-oss-120b-medium",
+			"gemini-3-flash",
+			"gemini-1.5-pro",
+		},
+		Aliases: []string{"google-antigravity"},
 	},
 	"claude-cli": {
 		ID:                  "claude-cli",

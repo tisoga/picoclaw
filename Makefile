@@ -293,6 +293,16 @@ build-launcher-android-arm64:
 		LDFLAGS='$(LDFLAGS)'
 	@echo "Build complete: $(BUILD_DIR)/picoclaw-launcher-android-arm64"
 
+## build-launcher-linux-arm: Build launcher for Linux ARMv7 (e.g. Raspberry Pi Zero 2 W 32-bit)
+build-launcher-linux-arm:
+	@echo "Building picoclaw-launcher for linux/arm (GOARM=7)..."
+	@mkdir -p $(BUILD_DIR)
+	@$(MAKE) -C web build-linux-arm \
+		OUTPUT_LINUX_ARM="$(CURDIR)/$(BUILD_DIR)/picoclaw-launcher-linux-arm" \
+		GO='$(GO)' \
+		LDFLAGS='$(LDFLAGS)'
+	@echo "Build complete: $(BUILD_DIR)/picoclaw-launcher-linux-arm"
+
 ## build-android-bundle: Build core and launcher for all Android architectures and package as universal zip
 build-android-bundle: generate
 	@echo "Building core for all Android architectures..."

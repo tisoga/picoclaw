@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -68,6 +69,8 @@ type TelegramChannel struct {
 	mediaGroupMu    sync.Mutex
 	mediaGroups     map[string]*telegramMediaGroup
 	mediaGroupDelay time.Duration
+
+	spool *Spool
 }
 
 type telegramMediaGroup struct {
@@ -128,12 +131,20 @@ func NewTelegramChannel(
 		channels.WithReasoningChannelID(bc.ReasoningChannelID),
 	)
 
+	spool, err := NewSpool()
+	if err != nil {
+		logger.WarnCF("telegram", "Failed to initialize spool db, will run without persistence", map[string]any{
+			"error": err.Error(),
+		})
+	}
+
 	ch := &TelegramChannel{
 		BaseChannel: base,
 		bot:         bot,
 		bc:          bc,
 		chatIDs:     make(map[string]int64),
 		tgCfg:       telegramCfg,
+		spool:       spool,
 
 		mediaGroups:     make(map[string]*telegramMediaGroup),
 		mediaGroupDelay: telegramMediaGroupDelay(telegramCfg),
@@ -170,6 +181,16 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 	c.bh = bh
 
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		if c.spool != nil {
+			if err := c.spool.Enqueue(&message); err != nil {
+				logger.WarnCF("telegram", "Failed to enqueue message to spool", map[string]any{
+					"error": err.Error(),
+				})
+				// Fallback: process directly if spool fails
+				return c.handleMessage(ctx, &message)
+			}
+			return nil
+		}
 		return c.handleMessage(ctx, &message)
 	}, th.AnyMessage())
 
@@ -177,6 +198,10 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 	logger.InfoCF("telegram", "Telegram bot connected", map[string]any{
 		"username": c.bot.Username(),
 	})
+
+	if c.spool != nil {
+		go c.processSpoolWorker()
+	}
 
 	c.startCommandRegistration(c.ctx, commands.BuiltinDefinitions())
 
@@ -1804,4 +1829,64 @@ func isPostConnectError(err error) bool {
 // VoiceCapabilities returns the voice capabilities of the channel.
 func (c *TelegramChannel) VoiceCapabilities() channels.VoiceCapabilities {
 	return channels.VoiceCapabilities{ASR: true, TTS: true}
+}
+
+// processSpoolWorker constantly checks the SQLite queue for pending messages
+// and processes them. It guarantees that if the app restarts, unprocessed
+// messages are safely picked back up.
+func (c *TelegramChannel) processSpoolWorker() {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			// Fetch next message
+			msgRow, err := c.spool.Dequeue()
+			if err != nil {
+				logger.WarnCF("telegram", "Error reading from ingress spool", map[string]any{
+					"error": err.Error(),
+				})
+				time.Sleep(1 * time.Second) // backoff
+				continue
+			}
+
+			// If queue is empty, do nothing
+			if msgRow == nil {
+				continue
+			}
+
+			// Decode the Telegram message
+			var tgMsg telego.Message
+			if err := json.Unmarshal(msgRow.Payload, &tgMsg); err != nil {
+				logger.WarnCF("telegram", "Corrupt message in spool, dropping", map[string]any{
+					"error": err.Error(),
+					"id":    msgRow.ID,
+				})
+				_ = c.spool.Acknowledge(msgRow.ID)
+				continue
+			}
+
+			// Process it exactly like normal
+			err = c.handleMessage(nil, &tgMsg)
+			if err != nil {
+				logger.WarnCF("telegram", "Failed to process spooled message", map[string]any{
+					"error": err.Error(),
+					"id":    msgRow.ID,
+				})
+				// If it failed more than 3 times, drop it to prevent poison messages
+				if msgRow.Attempts > 3 {
+					logger.ErrorCF("telegram", "Dropping poison message after 3 attempts", map[string]any{
+						"id": msgRow.ID,
+					})
+					_ = c.spool.Acknowledge(msgRow.ID)
+				}
+			} else {
+				// Success! Remove from spool.
+				_ = c.spool.Acknowledge(msgRow.ID)
+			}
+		}
+	}
 }

@@ -12,10 +12,43 @@ import (
 const DefaultGatewayLogLevel = "warn"
 
 type GatewayConfig struct {
-	Host      string `json:"host"                env:"PICOCLAW_GATEWAY_HOST"`
-	Port      int    `json:"port"                env:"PICOCLAW_GATEWAY_PORT"`
-	HotReload bool   `json:"hot_reload"          env:"PICOCLAW_GATEWAY_HOT_RELOAD"`
-	LogLevel  string `json:"log_level,omitempty" env:"PICOCLAW_LOG_LEVEL"`
+	Host      string               `json:"host"                yaml:"-" env:"PICOCLAW_GATEWAY_HOST"`
+	Port      int                  `json:"port"                yaml:"-" env:"PICOCLAW_GATEWAY_PORT"`
+	HotReload bool                 `json:"hot_reload"          yaml:"-" env:"PICOCLAW_GATEWAY_HOT_RELOAD"`
+	LogLevel  string               `json:"log_level,omitempty" yaml:"-" env:"PICOCLAW_LOG_LEVEL"`
+	Webhook   GatewayWebhookConfig `json:"webhook,omitempty"   yaml:"webhook,omitempty"`
+}
+
+// GatewayWebhookConfig configures an inbound HTTP webhook endpoint on the gateway.
+// External services POST to the configured path with a Bearer token to send
+// messages to any of the allowed channels.
+type GatewayWebhookConfig struct {
+	Enabled         bool         `json:"enabled"                    yaml:"-"`
+	Token           SecureString `json:"token,omitzero"             yaml:"token,omitempty"`
+	Path            string       `json:"path,omitempty"             yaml:"-"`
+	AllowedChannels []string     `json:"allowed_channels,omitempty" yaml:"-"`
+}
+
+// EffectiveWebhookPath returns the configured webhook path or the default.
+func (c GatewayWebhookConfig) EffectiveWebhookPath() string {
+	if c.Path != "" {
+		return c.Path
+	}
+	return "/webhook/send"
+}
+
+// IsChannelAllowed returns true if the channel is in the allowed list.
+// An empty AllowedChannels list means all channels are allowed.
+func (c GatewayWebhookConfig) IsChannelAllowed(channel string) bool {
+	if len(c.AllowedChannels) == 0 {
+		return true
+	}
+	for _, allowed := range c.AllowedChannels {
+		if strings.EqualFold(allowed, channel) {
+			return true
+		}
+	}
+	return false
 }
 
 func canonicalGatewayLogLevel(level logger.LogLevel) string {
