@@ -401,6 +401,9 @@ Even with `restrict_to_workspace: false`, the `exec` tool blocks these dangerous
 | `tools.allow_read_paths` | string[] | `[]` | Additional paths allowed for reading outside workspace |
 | `tools.allow_write_paths` | string[] | `[]` | Additional paths allowed for writing outside workspace |
 | `tools.message.media_enabled` | bool | `false` | Allows the `message` tool to attach local media files by path. This is separate from `tools.send_file.enabled`; enable it only when unified text/media/caption delivery is intended. |
+| `tools.image_generate.enabled` | bool | `true` | Enables the `image_generate` tool. It supports native Antigravity OAuth and OpenAI-compatible image providers. |
+
+For `google-antigravity` models, `image_generate` uses the logged-in OAuth credential and the native `gemini-3.1-flash-image` model. For OpenAI/Codex OAuth, it uses the subscription-backed Responses API `image_generation` tool. For API-key providers, it sends the prompt to `<api_base>/images/generations`. Generated images are delivered through the channel's media support.
 
 ### Read File Mode
 

@@ -1,8 +1,59 @@
 package oauthprovider
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
+
+func TestDefaultThoughtSignatureIsBase64(t *testing.T) {
+	if _, err := base64.StdEncoding.DecodeString(antigravityDefaultThoughtSignature); err != nil {
+		t.Fatalf("fallback thought signature is not base64: %v", err)
+	}
+}
+
+func TestGenerateImageUsesNativeAntigravityRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1internal:generateContent" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
+			t.Errorf("authorization = %q", got)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["model"] != "gemini-3.1-flash-image" || body["requestType"] != "image_gen" {
+			t.Errorf("envelope = %#v", body)
+		}
+		request := body["request"].(map[string]any)
+		generation := request["generationConfig"].(map[string]any)
+		imageConfig := generation["imageConfig"].(map[string]any)
+		if imageConfig["aspectRatio"] != "16:9" {
+			t.Errorf("imageConfig = %#v", imageConfig)
+		}
+		encoded := base64.StdEncoding.EncodeToString([]byte("native-image"))
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"` + encoded + `"}}]}}]}}`))
+	}))
+	defer server.Close()
+
+	p := &AntigravityProvider{
+		tokenSource: func() (string, string, error) { return "access-token", "project-id", nil },
+		httpClient:  server.Client(),
+		baseURL:     server.URL,
+	}
+	images, err := p.GenerateImage(context.Background(), "sunset", "gemini-3-flash", "16:9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 1 || string(images[0].Data) != "native-image" || images[0].MIMEType != "image/png" {
+		t.Fatalf("images = %#v", images)
+	}
+}
 
 func TestBuildRequestUsesFunctionFieldsWhenToolCallNameMissing(t *testing.T) {
 	p := &AntigravityProvider{}
@@ -25,7 +76,7 @@ func TestBuildRequestUsesFunctionFieldsWhenToolCallNameMissing(t *testing.T) {
 		},
 	}
 
-	req := p.buildRequest(messages, nil, "", nil)
+	req := p.buildRequest(messages, nil, "", nil, "session-test")
 	if len(req.Contents) != 2 {
 		t.Fatalf("expected 2 contents, got %d", len(req.Contents))
 	}
@@ -34,8 +85,8 @@ func TestBuildRequestUsesFunctionFieldsWhenToolCallNameMissing(t *testing.T) {
 	if modelPart.FunctionCall == nil {
 		t.Fatal("expected functionCall in assistant message")
 	}
-	if modelPart.FunctionCall.Name != "read_file" {
-		t.Fatalf("expected functionCall name read_file, got %q", modelPart.FunctionCall.Name)
+	if modelPart.FunctionCall.Name != "read_file_ide" {
+		t.Fatalf("expected functionCall name read_file_ide, got %q", modelPart.FunctionCall.Name)
 	}
 	if got := modelPart.FunctionCall.Args["path"]; got != "README.md" {
 		t.Fatalf("expected functionCall args[path] to be README.md, got %v", got)
@@ -45,8 +96,8 @@ func TestBuildRequestUsesFunctionFieldsWhenToolCallNameMissing(t *testing.T) {
 	if toolPart.FunctionResponse == nil {
 		t.Fatal("expected functionResponse in tool message")
 	}
-	if toolPart.FunctionResponse.Name != "read_file" {
-		t.Fatalf("expected functionResponse name read_file, got %q", toolPart.FunctionResponse.Name)
+	if toolPart.FunctionResponse.Name != "read_file_ide" {
+		t.Fatalf("expected functionResponse name read_file_ide, got %q", toolPart.FunctionResponse.Name)
 	}
 }
 
@@ -126,15 +177,23 @@ func TestBuildRequest_PreservesComplexToolSchemasByDefault(t *testing.T) {
 		}},
 		"gemini-3-flash",
 		nil,
+		"session-test",
 	)
 
-	if len(req.Tools) != 1 || len(req.Tools[0].FunctionDeclarations) != 1 {
-		t.Fatalf("request tools = %#v, want one function declaration", req.Tools)
+	if len(req.Tools) != 1 || len(req.Tools[0].FunctionDeclarations) == 0 {
+		t.Fatalf("request tools = %#v, want function declarations", req.Tools)
 	}
 
-	got, ok := req.Tools[0].FunctionDeclarations[0].Parameters.(map[string]any)
+	var parameters any
+	for _, declaration := range req.Tools[0].FunctionDeclarations {
+		if declaration.Name == "mcp_notion_create_ide" {
+			parameters = declaration.Parameters
+			break
+		}
+	}
+	got, ok := parameters.(map[string]any)
 	if !ok {
-		t.Fatalf("parameters = %#v, want map", req.Tools[0].FunctionDeclarations[0].Parameters)
+		t.Fatalf("parameters = %#v, want map", parameters)
 	}
 	if got["$defs"] == nil {
 		t.Fatalf("parameters = %#v, want raw schema with $defs preserved by default", got)

@@ -1,10 +1,12 @@
 package oauthprovider
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/openai/openai-go/v3"
@@ -13,6 +15,19 @@ import (
 
 	orc "github.com/sipeed/picoclaw/pkg/providers/openai_responses_common"
 )
+
+func TestParseCodexGeneratedImages(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("codex-image"))
+	body := "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"result\":\"" + encoded + "\"}}\n" +
+		"data: [DONE]\n"
+	images, err := parseCodexGeneratedImages(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 1 || string(images[0].Data) != "codex-image" || images[0].MIMEType != "image/png" {
+		t.Fatalf("images = %#v", images)
+	}
+}
 
 func TestBuildCodexParams_BasicMessage(t *testing.T) {
 	messages := []Message{

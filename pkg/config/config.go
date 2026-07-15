@@ -536,18 +536,53 @@ func (c StreamingConfig) WithDefaults(throttleSeconds, minGrowthChars int) Strea
 }
 
 type WhatsAppSettings struct {
-	BridgeURL        string `json:"bridge_url"         yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL"`
-	UseNative        bool   `json:"use_native"         yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_USE_NATIVE"`
-	SessionStorePath string `json:"session_store_path" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_SESSION_STORE_PATH"`
+	BridgeURL        string                           `json:"bridge_url"         yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL"`
+	UseNative        bool                             `json:"use_native"         yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_USE_NATIVE"`
+	SessionStorePath string                           `json:"session_store_path" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_SESSION_STORE_PATH"`
+	DMPolicy         string                           `json:"dm_policy"          yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_DM_POLICY"`
+	GroupPolicy      string                           `json:"group_policy"       yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_GROUP_POLICY"`
+	GroupAllowFrom   FlexibleStringSlice              `json:"group_allow_from,omitempty" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_GROUP_ALLOW_FROM"`
+	Groups           map[string]WhatsAppGroupSettings `json:"groups,omitempty" yaml:"-"`
+	MediaMaxMB       int                              `json:"media_max_mb"       yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_MEDIA_MAX_MB"`
+	SendReadReceipts bool                             `json:"send_read_receipts" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_SEND_READ_RECEIPTS"`
+	AckReaction      string                           `json:"ack_reaction"       yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_ACK_REACTION"`
+}
+
+type WhatsAppGroupSettings struct {
+	Enabled        *bool               `json:"enabled,omitempty" yaml:"-"`
+	RequireMention *bool               `json:"require_mention,omitempty" yaml:"-"`
+	AllowFrom      FlexibleStringSlice `json:"allow_from,omitempty" yaml:"-"`
 }
 
 type TelegramSettings struct {
-	Token             SecureString    `json:"token,omitzero"       yaml:"token,omitempty" env:"PICOCLAW_CHANNELS_TELEGRAM_TOKEN"`
-	BaseURL           string          `json:"base_url"             yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_BASE_URL"`
-	Proxy             string          `json:"proxy"                yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_PROXY"`
-	Streaming         StreamingConfig `json:"streaming,omitzero"   yaml:"-"`
-	UseMarkdownV2     bool            `json:"use_markdown_v2"      yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_USE_MARKDOWN_V2"`
-	MediaGroupDelayMS int             `json:"media_group_delay_ms" yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_MEDIA_GROUP_DELAY_MS"`
+	Token             SecureString                     `json:"token,omitzero"       yaml:"token,omitempty" env:"PICOCLAW_CHANNELS_TELEGRAM_TOKEN"`
+	BaseURL           string                           `json:"base_url"             yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_BASE_URL"`
+	Proxy             string                           `json:"proxy"                yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_PROXY"`
+	Streaming         StreamingConfig                  `json:"streaming,omitzero"   yaml:"-"`
+	RichMessages      bool                             `json:"rich_messages"        yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_RICH_MESSAGES"`
+	UseMarkdownV2     bool                             `json:"use_markdown_v2"      yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_USE_MARKDOWN_V2"`
+	MediaGroupDelayMS int                              `json:"media_group_delay_ms" yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_MEDIA_GROUP_DELAY_MS"`
+	DMPolicy          string                           `json:"dm_policy"          yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_DM_POLICY"`
+	GroupPolicy       string                           `json:"group_policy"       yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_GROUP_POLICY"`
+	Groups            map[string]TelegramGroupSettings `json:"groups,omitempty" yaml:"-"`
+	MediaMaxMB        int                              `json:"media_max_mb"       yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_MEDIA_MAX_MB"`
+	MaxAlbumItems     int                              `json:"max_album_items"    yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_MAX_ALBUM_ITEMS"`
+	AckReactions      bool                             `json:"ack_reactions"     yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_ACK_REACTIONS"`
+}
+
+// TelegramGroupSettings provides bounded per-chat and per-topic overrides.
+// A nil pointer means "inherit the channel default".
+type TelegramGroupSettings struct {
+	Enabled        *bool                            `json:"enabled,omitempty" yaml:"-"`
+	RequireMention *bool                            `json:"require_mention,omitempty" yaml:"-"`
+	AllowFrom      FlexibleStringSlice              `json:"allow_from,omitempty" yaml:"-"`
+	Topics         map[string]TelegramTopicSettings `json:"topics,omitempty" yaml:"-"`
+}
+
+type TelegramTopicSettings struct {
+	Enabled        *bool               `json:"enabled,omitempty" yaml:"-"`
+	RequireMention *bool               `json:"require_mention,omitempty" yaml:"-"`
+	AllowFrom      FlexibleStringSlice `json:"allow_from,omitempty" yaml:"-"`
 }
 
 type FeishuSettings struct {
@@ -1130,6 +1165,7 @@ type ToolsConfig struct {
 	InstallSkill    ToolConfig         `json:"install_skill"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
 	ListDir         ToolConfig         `json:"list_dir"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
 	LoadImage       ToolConfig         `json:"load_image"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LOAD_IMAGE_"`
+	ImageGenerate   ToolConfig         `json:"image_generate"    yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_IMAGE_GENERATE_"`
 	Message         MessageToolsConfig `json:"message"           yaml:"-"`
 	ReadFile        ReadFileToolConfig `json:"read_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_READ_FILE_"`
 	Serial          ToolConfig         `json:"serial"            yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SERIAL_"`
@@ -1885,6 +1921,8 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.ListDir.Enabled
 	case "load_image":
 		return t.LoadImage.Enabled
+	case "image_generate":
+		return t.ImageGenerate.Enabled
 	case "message":
 		return t.Message.Enabled
 	case "read_file":

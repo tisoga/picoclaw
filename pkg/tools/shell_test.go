@@ -46,6 +46,15 @@ func TestShellTool_Success(t *testing.T) {
 	}
 }
 
+func TestImageGenerationFallbackWarning(t *testing.T) {
+	if got := imageGenerationFallbackWarning("python3 draw_image.py --output cat.png"); got == "" {
+		t.Fatal("expected warning for Python image fallback")
+	}
+	if got := imageGenerationFallbackWarning("python3 calculate.py"); got != "" {
+		t.Fatalf("unexpected warning for ordinary Python command: %q", got)
+	}
+}
+
 // TestShellTool_Failure verifies failed command execution
 func TestShellTool_Failure(t *testing.T) {
 	tool, err := NewExecTool("", false)

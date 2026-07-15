@@ -1,9 +1,15 @@
 package oauthprovider
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
@@ -22,6 +28,7 @@ const (
 
 type CodexProvider struct {
 	client          *openai.Client
+	token           string
 	accountID       string
 	tokenSource     func() (string, string, error)
 	enableWebSearch bool
@@ -42,9 +49,145 @@ func NewCodexProvider(token, accountID string) *CodexProvider {
 	client := openai.NewClient(opts...)
 	return &CodexProvider{
 		client:          &client,
+		token:           token,
 		accountID:       accountID,
 		enableWebSearch: true,
 	}
+}
+
+// GenerateImage uses the Codex OAuth Responses API image_generation tool.
+// This is the same subscription-backed route used by OpenClaw, and is
+// intentionally separate from the API-key /images/generations endpoint.
+func (p *CodexProvider) GenerateImage(ctx context.Context, prompt, model, _ string) ([]AntigravityGeneratedImage, error) {
+	token := p.token
+	accountID := p.accountID
+	if p.tokenSource != nil {
+		refreshed, account, err := p.tokenSource()
+		if err != nil {
+			return nil, fmt.Errorf("refreshing codex token: %w", err)
+		}
+		token, accountID = refreshed, account
+	}
+	if token == "" {
+		return nil, fmt.Errorf("codex OAuth token is missing")
+	}
+	imageModel := strings.TrimSpace(model)
+	if i := strings.LastIndex(imageModel, "/"); i >= 0 {
+		imageModel = imageModel[i+1:]
+	}
+	if !strings.Contains(strings.ToLower(imageModel), "image") {
+		imageModel = "gpt-image-2"
+	}
+	body := map[string]any{
+		"model": "gpt-5.6-sol",
+		"input": []any{map[string]any{
+			"role":    "user",
+			"content": []any{map[string]any{"type": "input_text", "text": prompt}},
+		}},
+		"instructions": "You are an image generation assistant.",
+		"tools":        []any{map[string]any{"type": "image_generation", "model": imageModel}},
+		"tool_choice":  map[string]any{"type": "image_generation"},
+		"stream":       true,
+		"store":        false,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal codex image request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("originator", "codex_cli_rs")
+	req.Header.Set("OpenAI-Beta", "responses=experimental")
+	if accountID != "" {
+		req.Header.Set("Chatgpt-Account-Id", accountID)
+	}
+	client := http.DefaultClient
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("codex image API call: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return nil, fmt.Errorf("codex image API returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	return parseCodexGeneratedImages(resp.Body)
+}
+
+func parseCodexGeneratedImages(reader io.Reader) ([]AntigravityGeneratedImage, error) {
+	scanner := bufio.NewScanner(io.LimitReader(reader, 64<<20))
+	scanner.Buffer(make([]byte, 64*1024), 64<<20)
+	var images []AntigravityGeneratedImage
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var event struct {
+			Type     string                        `json:"type"`
+			Item     struct{ Type, Result string } `json:"item"`
+			Response struct {
+				Output []struct{ Type, Result string } `json:"output"`
+			} `json:"response"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+		if event.Type == "response.failed" || event.Type == "error" {
+			if event.Error.Message == "" {
+				event.Error.Message = "codex image generation failed"
+			}
+			return nil, errors.New(event.Error.Message)
+		}
+		if event.Type == "response.output_item.done" && event.Item.Type == "image_generation_call" {
+			if image, err := decodeCodexImage(event.Item.Result); err != nil {
+				return nil, err
+			} else if image != nil {
+				images = append(images, *image)
+			}
+		}
+		if event.Type == "response.completed" {
+			for _, output := range event.Response.Output {
+				if output.Type == "image_generation_call" {
+					if image, err := decodeCodexImage(output.Result); err != nil {
+						return nil, err
+					} else if image != nil {
+						images = append(images, *image)
+					}
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(images) == 0 {
+		return nil, fmt.Errorf("codex image response contained no image data")
+	}
+	return images, nil
+}
+
+func decodeCodexImage(encoded string) (*AntigravityGeneratedImage, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("decode codex image data: %w", err)
+	}
+	return &AntigravityGeneratedImage{Data: data, MIMEType: "image/png"}, nil
 }
 
 func NewCodexProviderWithTokenSource(

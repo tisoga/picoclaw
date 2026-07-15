@@ -156,7 +156,20 @@ func (c *BaseChannel) MaxMessageLength() int {
 //   - If prefixes configured but no match and not mentioned → ignore
 //   - Otherwise (no group_trigger configured) → respond to all (permissive default)
 func (c *BaseChannel) ShouldRespondInGroup(isMentioned bool, content string) (bool, string) {
+	return shouldRespondInGroup(isMentioned, content, c.groupTrigger)
+}
+
+// ShouldRespondInGroupWithMentionOverride applies a per-chat mention policy
+// while retaining the channel's configured prefixes.
+func (c *BaseChannel) ShouldRespondInGroupWithMentionOverride(isMentioned bool, content string, mentionOnly *bool) (bool, string) {
 	gt := c.groupTrigger
+	if mentionOnly != nil {
+		gt.MentionOnly = *mentionOnly
+	}
+	return shouldRespondInGroup(isMentioned, content, gt)
+}
+
+func shouldRespondInGroup(isMentioned bool, content string, gt config.GroupTriggerConfig) (bool, string) {
 
 	// Mentioned → always respond
 	if isMentioned {

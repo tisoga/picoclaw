@@ -147,3 +147,22 @@ func TestIsBotMentioned_MentionEntityUnaffected(t *testing.T) {
 		t.Fatal("expected mention entity to be treated as bot mention")
 	}
 }
+
+func TestTelegramEntityTextUsesUTF16Offsets(t *testing.T) {
+	text := "👋 hello @my_bot"
+	// The leading emoji occupies two UTF-16 code units. Telegram therefore
+	// reports the mention at offset 9, although it starts at rune index 8.
+	entity := telego.MessageEntity{
+		Type:   telego.EntityTypeMention,
+		Offset: 9,
+		Length: 7,
+	}
+
+	got, ok := telegramEntityText(text, entity)
+	if !ok {
+		t.Fatal("expected a valid Telegram entity range")
+	}
+	if got != "@my_bot" {
+		t.Fatalf("entity text = %q, want %q", got, "@my_bot")
+	}
+}
