@@ -483,6 +483,9 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 	if output == "" {
 		output = "(no output)"
 	}
+	if warning := imageGenerationFallbackWarning(command); warning != "" {
+		output += "\n\n" + warning
+	}
 
 	maxLen := 10000
 	if len(output) > maxLen {
@@ -502,6 +505,20 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 		ForUser: output,
 		IsError: false,
 	}
+}
+
+func imageGenerationFallbackWarning(command string) string {
+	lower := strings.ToLower(command)
+	if !strings.Contains(lower, "python") {
+		return ""
+	}
+	imageMarkers := []string{".png", ".jpg", ".jpeg", ".webp", "image", "pillow", "pil.", "zlib"}
+	for _, marker := range imageMarkers {
+		if strings.Contains(lower, marker) {
+			return "Notice: this image was created locally with a Python/script fallback, not by an image-generation model."
+		}
+	}
+	return ""
 }
 
 func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEnabled bool) *ToolResult {

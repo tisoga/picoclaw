@@ -4,14 +4,19 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
+	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers/common"
@@ -23,6 +28,7 @@ const (
 	antigravityUserAgent    = "antigravity"
 	antigravityXGoogClient  = "google-cloud-sdk vscode_cloudshelleditor/0.1"
 	antigravityVersion      = "1.15.8"
+	antigravityIDEVersion   = "2.1.1"
 )
 
 // AntigravityProvider implements LLMProvider using Google's Cloud Code Assist (Antigravity) API.
@@ -31,6 +37,7 @@ const (
 type AntigravityProvider struct {
 	tokenSource func() (string, string, error) // Returns (accessToken, projectID, error)
 	httpClient  *http.Client
+	baseURL     string
 }
 
 // NewAntigravityProvider creates a new Antigravity provider using stored auth credentials.
@@ -40,7 +47,160 @@ func NewAntigravityProvider() *AntigravityProvider {
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 		},
+		baseURL: "https://daily-cloudcode-pa.googleapis.com",
 	}
+}
+
+// AntigravityGeneratedImage is an inline image returned by Cloud Code Assist.
+type AntigravityGeneratedImage struct {
+	Data     []byte
+	MIMEType string
+}
+
+// GenerateImage calls Antigravity's native non-streaming image generation path.
+func (p *AntigravityProvider) GenerateImage(
+	ctx context.Context,
+	prompt string,
+	model string,
+	aspectRatio string,
+) ([]AntigravityGeneratedImage, error) {
+	accessToken, projectID, err := p.tokenSource()
+	if err != nil {
+		return nil, fmt.Errorf("antigravity auth: %w", err)
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return nil, fmt.Errorf("antigravity image generation requires a prompt")
+	}
+	model = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(model), "google-antigravity/"), "antigravity/")
+	if !strings.Contains(strings.ToLower(model), "image") {
+		model = "gemini-3.1-flash-image"
+	}
+	model = trimAntigravityImageSizeSuffix(model)
+	if aspectRatio == "" {
+		aspectRatio = "1:1"
+	}
+	sessionID := "session-" + uuid.NewString()
+	conversationID := uuid.NewString()
+	trajectoryID := uuid.NewString()
+	envelope := map[string]any{
+		"project":     projectID,
+		"model":       model,
+		"userAgent":   antigravityUserAgent,
+		"requestType": "image_gen",
+		"requestId":   fmt.Sprintf("agent/%s/%d/%s/1", conversationID, time.Now().UnixMilli(), trajectoryID),
+		"request": map[string]any{
+			"contents": []map[string]any{{"role": "user", "parts": []map[string]string{{"text": prompt}}}},
+			"generationConfig": map[string]any{
+				"temperature": 1.0, "topP": 0.95, "topK": 40, "maxOutputTokens": 8192,
+				"imageConfig": map[string]string{"aspectRatio": aspectRatio},
+			},
+			"sessionId": sessionID,
+		},
+	}
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("marshal antigravity image request: %w", err)
+	}
+	baseURL := strings.TrimRight(p.baseURL, "/")
+	if baseURL == "" {
+		baseURL = "https://daily-cloudcode-pa.googleapis.com"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1internal:generateContent", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create antigravity image request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "google-api-nodejs-client/9.15.1")
+	req.Header.Set("X-Goog-Api-Client", antigravityXGoogClient)
+	req.Header.Set("X-Machine-Session-Id", sessionID)
+	client := p.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 180 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("antigravity image API call: %w", err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read antigravity image response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, p.parseAntigravityError(resp.StatusCode, responseBody)
+	}
+	return parseAntigravityImageResponse(responseBody)
+}
+
+func trimAntigravityImageSizeSuffix(model string) string {
+	separator := strings.LastIndex(model, "-")
+	if separator < 0 {
+		return model
+	}
+	var width, height int
+	if n, err := fmt.Sscanf(model[separator+1:], "%dx%d", &width, &height); err == nil && n == 2 {
+		return model[:separator]
+	}
+	return model
+}
+
+func parseAntigravityImageResponse(body []byte) ([]AntigravityGeneratedImage, error) {
+	type inlineData struct {
+		Data          string `json:"data"`
+		MIMEType      string `json:"mimeType"`
+		MIMETypeSnake string `json:"mime_type"`
+	}
+	type responseBody struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					InlineData      *inlineData `json:"inlineData"`
+					InlineDataSnake *inlineData `json:"inline_data"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	var payload struct {
+		Response *responseBody `json:"response"`
+		responseBody
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode antigravity image response: %w", err)
+	}
+	parsed := payload.responseBody
+	if payload.Response != nil {
+		parsed = *payload.Response
+	}
+	var images []AntigravityGeneratedImage
+	for _, candidate := range parsed.Candidates {
+		for _, part := range candidate.Content.Parts {
+			inline := part.InlineData
+			if inline == nil {
+				inline = part.InlineDataSnake
+			}
+			if inline == nil || inline.Data == "" {
+				continue
+			}
+			decoded, err := base64.StdEncoding.DecodeString(inline.Data)
+			if err != nil {
+				return nil, fmt.Errorf("decode antigravity image data: %w", err)
+			}
+			mimeType := inline.MIMEType
+			if mimeType == "" {
+				mimeType = inline.MIMETypeSnake
+			}
+			if mimeType == "" {
+				mimeType = "image/png"
+			}
+			images = append(images, AntigravityGeneratedImage{Data: decoded, MIMEType: mimeType})
+		}
+	}
+	if len(images) == 0 {
+		return nil, fmt.Errorf("antigravity image response contained no image data")
+	}
+	return images, nil
 }
 
 // Chat implements LLMProvider.Chat using the Cloud Code Assist v1internal API.
@@ -294,30 +454,30 @@ func (p *AntigravityProvider) buildRequest(
 					)
 					continue
 				}
-				
+
 				// 9router: Gemini 3 crashes if a tool call has no thoughtSignature. Backfill.
 				if thoughtSignature == "" {
-					thoughtSignature = "Thinking..."
+					thoughtSignature = antigravityDefaultThoughtSignature
 				}
 
-					// 9router: Append _ide to tool names to match decoy pattern
-					isNative := false
-					for _, nativeName := range []string{
-						"browser_subagent", "command_status", "find_by_name", "generate_image",
-						"grep_search", "list_dir", "list_resources", "multi_replace_file_content",
-						"notify_user", "read_resource", "read_terminal", "read_url_content",
-						"replace_file_content", "run_command", "search_web", "send_command_input",
-						"task_boundary", "view_content_chunk", "view_file", "write_to_file",
-					} {
-						if toolName == nativeName {
-							isNative = true
-							break
-						}
+				// 9router: Append _ide to tool names to match decoy pattern
+				isNative := false
+				for _, nativeName := range []string{
+					"browser_subagent", "command_status", "find_by_name", "generate_image",
+					"grep_search", "list_dir", "list_resources", "multi_replace_file_content",
+					"notify_user", "read_resource", "read_terminal", "read_url_content",
+					"replace_file_content", "run_command", "search_web", "send_command_input",
+					"task_boundary", "view_content_chunk", "view_file", "write_to_file",
+				} {
+					if toolName == nativeName {
+						isNative = true
+						break
 					}
+				}
 
-					if !isNative {
-						toolName = toolName + "_ide"
-					}
+				if !isNative {
+					toolName = toolName + "_ide"
+				}
 
 				if tc.ID != "" {
 					toolCallNames[tc.ID] = toolName
@@ -336,9 +496,9 @@ func (p *AntigravityProvider) buildRequest(
 			}
 		case "tool":
 			toolName := common.ResolveToolResponseName(msg.ToolCallID, toolCallNames)
-					if !strings.HasSuffix(toolName, "_ide") {
-						toolName += "_ide"
-					}
+			if !strings.HasSuffix(toolName, "_ide") {
+				toolName += "_ide"
+			}
 			req.Contents = append(req.Contents, antigravityContent{
 				Role: "user",
 				Parts: []antigravityPart{{
@@ -598,7 +758,7 @@ func createAntigravityTokenSource() func() (string, string, error) {
 			if err != nil {
 				return "", "", fmt.Errorf("failed to fetch project ID: %w. Your Google account may not be eligible for Gemini Code Assist", err)
 			}
-			
+
 			// 9router: Explicitly onboard the user. If we don't do this, chat requests will fail
 			// with "project not onboarded" errors.
 			if err := OnboardAntigravityUser(cred.AccessToken, fetchedID); err != nil {
@@ -664,99 +824,282 @@ func FetchAntigravityProjectID(accessToken string) (string, error) {
 	return result.CloudAICompanionProject, nil
 }
 
-// FetchAntigravityModels fetches available models from the Cloud Code Assist API.
-func FetchAntigravityModels(accessToken, projectID string) ([]AntigravityModelInfo, error) {
-	reqBody, _ := json.Marshal(map[string]any{
-		"project": projectID,
-	})
+// AntigravityQuotaSnapshot is a point-in-time view of the account quota data
+// returned by the Cloud Code Assist APIs.
+type AntigravityQuotaSnapshot struct {
+	Plan      string                 `json:"plan"`
+	ProjectID string                 `json:"project_id"`
+	Models    []AntigravityModelInfo `json:"models"`
+}
 
-	req, err := http.NewRequest("POST", antigravityBaseURL+"/v1internal:fetchAvailableModels", bytes.NewReader(reqBody))
+// AntigravityAPIError preserves the upstream status code so callers can
+// distinguish an expired credential from a quota service failure.
+type AntigravityAPIError struct {
+	StatusCode int
+	Operation  string
+	Body       string
+}
+
+func (e *AntigravityAPIError) Error() string {
+	return fmt.Sprintf("%s failed (HTTP %d): %s", e.Operation, e.StatusCode, e.Body)
+}
+
+var antigravityQuotaModelOrder = []string{
+	"gemini-3-flash-agent",
+	"gemini-3.5-flash-low",
+	"gemini-3.5-flash-extra-low",
+	"gemini-pro-agent",
+	"gemini-3.1-pro-low",
+	"claude-sonnet-4-6",
+	"claude-opus-4-6-thinking",
+	"gpt-oss-120b-medium",
+	"gemini-3-flash",
+	"gemini-3.1-flash-image",
+	"gemini-3-pro-image",
+}
+
+// FetchAntigravityQuota fetches the subscription tier and the real quota
+// buckets returned for the recommended Antigravity models.
+func FetchAntigravityQuota(accessToken, projectID string) (*AntigravityQuotaSnapshot, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	return fetchAntigravityQuota(client, antigravityBaseURL, accessToken, projectID)
+}
+
+// FetchAntigravityModels remains available for model catalog callers.
+func FetchAntigravityModels(accessToken, projectID string) ([]AntigravityModelInfo, error) {
+	snapshot, err := FetchAntigravityQuota(accessToken, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.Models, nil
+}
+
+func fetchAntigravityQuota(
+	client *http.Client,
+	baseURL, accessToken, projectID string,
+) (*AntigravityQuotaSnapshot, error) {
+	snapshot := &AntigravityQuotaSnapshot{Plan: "Unknown", ProjectID: projectID}
+
+	subscription, err := fetchAntigravitySubscription(client, baseURL, accessToken)
+	if err == nil {
+		if subscription.ProjectID != "" {
+			snapshot.ProjectID = subscription.ProjectID
+		}
+		if subscription.Plan != "" {
+			snapshot.Plan = subscription.Plan
+		}
+	} else if snapshot.ProjectID == "" {
+		return nil, err
+	}
+
+	models, err := fetchAntigravityQuotaModels(client, baseURL, accessToken, snapshot.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.Models = models
+	return snapshot, nil
+}
+
+type antigravitySubscription struct {
+	ProjectID string
+	Plan      string
+}
+
+func fetchAntigravitySubscription(
+	client *http.Client,
+	baseURL, accessToken string,
+) (antigravitySubscription, error) {
+	body, err := json.Marshal(map[string]any{
+		"metadata": antigravityClientMetadata(),
+		"mode":     1,
+	})
+	if err != nil {
+		return antigravitySubscription{}, err
+	}
+
+	responseBody, err := doAntigravityQuotaRequest(
+		client,
+		baseURL+"/v1internal:loadCodeAssist",
+		accessToken,
+		body,
+		"loadCodeAssist",
+	)
+	if err != nil {
+		return antigravitySubscription{}, err
+	}
+
+	var result struct {
+		ProjectID   string `json:"cloudaicompanionProject"`
+		CurrentTier struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"currentTier"`
+	}
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return antigravitySubscription{}, fmt.Errorf("parsing loadCodeAssist response: %w", err)
+	}
+	plan := strings.TrimSpace(result.CurrentTier.Name)
+	if plan == "" {
+		plan = strings.TrimSpace(result.CurrentTier.ID)
+	}
+	return antigravitySubscription{ProjectID: result.ProjectID, Plan: plan}, nil
+}
+
+func fetchAntigravityQuotaModels(
+	client *http.Client,
+	baseURL, accessToken, projectID string,
+) ([]AntigravityModelInfo, error) {
+	reqBody, err := json.Marshal(map[string]any{"project": projectID})
+	if err != nil {
+		return nil, err
+	}
+	responseBody, err := doAntigravityQuotaRequest(
+		client,
+		baseURL+"/v1internal:fetchAvailableModels",
+		accessToken,
+		reqBody,
+		"fetchAvailableModels",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	type quotaInfo struct {
+		RemainingFraction json.RawMessage `json:"remainingFraction"`
+		ResetTime         string          `json:"resetTime"`
+		IsExhausted       bool            `json:"isExhausted"`
+	}
+	var result struct {
+		Models map[string]struct {
+			DisplayName string     `json:"displayName"`
+			IsInternal  bool       `json:"isInternal"`
+			QuotaInfo   *quotaInfo `json:"quotaInfo"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return nil, fmt.Errorf("parsing fetchAvailableModels response: %w", err)
+	}
+
+	order := make(map[string]int, len(antigravityQuotaModelOrder))
+	for i, id := range antigravityQuotaModelOrder {
+		order[id] = i
+	}
+
+	models := make([]AntigravityModelInfo, 0, len(result.Models))
+	for id, info := range result.Models {
+		position, recommended := order[id]
+		if !recommended || info.IsInternal || info.QuotaInfo == nil {
+			continue
+		}
+		fraction, err := parseRemainingFraction(info.QuotaInfo.RemainingFraction)
+		if err != nil {
+			logger.WarnCF("provider.antigravity", "Skipping model with invalid quota", map[string]any{
+				"model": id,
+				"error": err.Error(),
+			})
+			continue
+		}
+		displayName := strings.TrimSpace(info.DisplayName)
+		if displayName == "" {
+			displayName = id
+		}
+		models = append(models, AntigravityModelInfo{
+			ID:                id,
+			DisplayName:       displayName,
+			IsExhausted:       info.QuotaInfo.IsExhausted || fraction <= 0,
+			RemainingFraction: fraction,
+			ResetTime:         info.QuotaInfo.ResetTime,
+			order:             position,
+		})
+	}
+
+	sort.SliceStable(models, func(i, j int) bool {
+		return models[i].order < models[j].order
+	})
+	return models, nil
+}
+
+func doAntigravityQuotaRequest(
+	client *http.Client,
+	url, accessToken string,
+	body []byte,
+	operation string,
+) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", antigravityUserAgent)
+	req.Header.Set("User-Agent", antigravityIDEUserAgent())
+	req.Header.Set("X-Client-Name", "antigravity")
+	req.Header.Set("X-Client-Version", antigravityIDEVersion)
 	req.Header.Set("X-Goog-Api-Client", antigravityXGoogClient)
 
-	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s request: %w", operation, err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return nil, fmt.Errorf("reading fetchAvailableModels response: %w", err)
+		return nil, fmt.Errorf("reading %s response: %w", operation, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"fetchAvailableModels failed (HTTP %d): %s",
-			resp.StatusCode,
-			truncateString(string(body), 200),
-		)
-	}
-
-	var result struct {
-		Models map[string]struct {
-			DisplayName string `json:"displayName"`
-			QuotaInfo   struct {
-				RemainingFraction any    `json:"remainingFraction"`
-				ResetTime         string `json:"resetTime"`
-				IsExhausted       bool   `json:"isExhausted"`
-			} `json:"quotaInfo"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing models response: %w", err)
-	}
-
-	var models []AntigravityModelInfo
-	for id, info := range result.Models {
-		var fraction float64
-		switch v := info.QuotaInfo.RemainingFraction.(type) {
-		case float64:
-			fraction = v
-		case string:
-			fmt.Sscanf(v, "%f", &fraction)
-		}
-
-		models = append(models, AntigravityModelInfo{
-			ID:                id,
-			DisplayName:       info.DisplayName,
-			IsExhausted:       info.QuotaInfo.IsExhausted,
-			RemainingFraction: fraction,
-			ResetTime:         info.QuotaInfo.ResetTime,
-		})
-	}
-
-	// Inject 9router standard and experimental aliases if not returned by API
-	nineRouterModels := []AntigravityModelInfo{
-		{ID: "gemini-3-flash-agent", DisplayName: "Gemini 3.5 Flash (High)"},
-		{ID: "gemini-3.5-flash-low", DisplayName: "Gemini 3.5 Flash (Medium)"},
-		{ID: "gemini-3.5-flash-extra-low", DisplayName: "Gemini 3.5 Flash (Low)"},
-		{ID: "gemini-pro-agent", DisplayName: "Gemini 3.1 Pro (High)"},
-		{ID: "gemini-3.1-pro-low", DisplayName: "Gemini 3.1 Pro (Low)"},
-		{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6 (Thinking)"},
-		{ID: "claude-opus-4-6-thinking", DisplayName: "Claude Opus 4.6 (Thinking)"},
-		{ID: "gpt-oss-120b-medium", DisplayName: "GPT-OSS 120B (Medium)"},
-		{ID: "gemini-3-flash", DisplayName: "Gemini 3 Flash"},
-		{ID: "gemini-1.5-pro", DisplayName: "Gemini 1.5 Pro"},
-	}
-
-	existingModels := make(map[string]bool)
-	for _, m := range models {
-		existingModels[m.ID] = true
-	}
-
-	for _, m := range nineRouterModels {
-		if !existingModels[m.ID] {
-			models = append(models, m)
+		return nil, &AntigravityAPIError{
+			StatusCode: resp.StatusCode,
+			Operation:  operation,
+			Body:       truncateString(string(responseBody), 300),
 		}
 	}
+	return responseBody, nil
+}
 
-	return models, nil
+func parseRemainingFraction(raw json.RawMessage) (float64, error) {
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "null" {
+		return 0, fmt.Errorf("remainingFraction is missing")
+	}
+	if strings.HasPrefix(value, "\"") {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return 0, err
+		}
+		value = text
+	}
+	fraction, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, err
+	}
+	if fraction < 0 {
+		fraction = 0
+	}
+	if fraction > 1 {
+		fraction = 1
+	}
+	return fraction, nil
+}
+
+func antigravityClientMetadata() map[string]any {
+	platform := 0
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "darwin/amd64":
+		platform = 1
+	case "darwin/arm64":
+		platform = 2
+	case "linux/amd64":
+		platform = 3
+	case "linux/arm64":
+		platform = 4
+	case "windows/amd64":
+		platform = 5
+	}
+	return map[string]any{"ideType": 9, "platform": platform, "pluginType": 2}
+}
+
+func antigravityIDEUserAgent() string {
+	return fmt.Sprintf("antigravity/ide/%s %s/%s", antigravityIDEVersion, runtime.GOOS, runtime.GOARCH)
 }
 
 type AntigravityModelInfo struct {
@@ -765,6 +1108,7 @@ type AntigravityModelInfo struct {
 	IsExhausted       bool    `json:"is_exhausted"`
 	RemainingFraction float64 `json:"remaining_fraction"`
 	ResetTime         string  `json:"reset_time"`
+	order             int
 }
 
 // --- Helpers ---
@@ -833,21 +1177,21 @@ func OnboardAntigravityUser(accessToken, projectID string) error {
 	req.Header.Set("X-Goog-Api-Client", antigravityXGoogClient)
 
 	client := &http.Client{Timeout: 15 * time.Second}
-	
+
 	// 9router polls this endpoint up to 10 times to ensure provisioning finishes
 	for i := 0; i < 5; i++ {
 		resp, err := client.Do(req)
 		if err != nil {
 			return err
 		}
-		
+
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		
+
 		if resp.StatusCode == http.StatusOK {
 			return nil
 		}
-		
+
 		if i == 4 {
 			return fmt.Errorf("onboardUser failed after 5 retries: HTTP %d: %s", resp.StatusCode, string(body))
 		}

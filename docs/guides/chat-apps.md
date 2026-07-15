@@ -172,9 +172,9 @@ PicoClaw can connect to WhatsApp in two ways:
 ```json
 {
   "channel_list": {
-    "whatsapp": {
+    "whatsapp_native": {
       "enabled": true,
-      "type": "whatsapp",
+      "type": "whatsapp_native",
       "use_native": true,
       "session_store_path": "",
       "allow_from": []
@@ -184,6 +184,27 @@ PicoClaw can connect to WhatsApp in two ways:
 ```
 
 If `session_store_path` is empty, the session is stored in `<workspace>/whatsapp/`. Run `picoclaw gateway`; on first run, scan the QR code printed in the terminal with WhatsApp → Linked Devices.
+
+The bridge remains a separate channel type and does not require the native build:
+
+```json
+{
+  "channel_list": {
+    "whatsapp": {
+      "enabled": true,
+      "type": "whatsapp",
+      "bridge_url": "ws://localhost:3001",
+      "allow_from": []
+    }
+  }
+}
+```
+
+Both transports support the optional policy fields `dm_policy`, `group_policy`,
+`group_allow_from`, `groups`, and `media_max_mb` (50 MiB by default). Native mode additionally supports
+QR-linked sessions, native media, typing, read receipts, and reactions. Bridge actions
+are sent as JSON messages to the external bridge, so that bridge must implement those
+message types to use them.
 
 </details>
 

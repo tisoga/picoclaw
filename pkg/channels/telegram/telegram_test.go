@@ -582,6 +582,34 @@ func TestSend_ShortMessage_SingleCall(t *testing.T) {
 	assert.Len(t, caller.calls, 1, "short message should result in exactly one SendMessage call")
 }
 
+func TestSend_RichMessageOptIn(t *testing.T) {
+	caller := &stubCaller{
+		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
+			return successResponse(t), nil
+		},
+	}
+	ch := newTestChannel(t, caller)
+	ch.tgCfg.RichMessages = true
+
+	_, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID:  "12345",
+		Content: "**Hello**",
+	})
+	require.NoError(t, err)
+	require.Len(t, caller.calls, 1)
+	assert.Contains(t, caller.calls[0].URL, "sendRichMessage")
+
+	var params struct {
+		ChatID      int64 `json:"chat_id"`
+		RichMessage struct {
+			HTML string `json:"html"`
+		} `json:"rich_message"`
+	}
+	require.NoError(t, json.Unmarshal(caller.calls[0].Data.BodyRaw, &params))
+	assert.Equal(t, int64(12345), params.ChatID)
+	assert.Equal(t, "<b>Hello</b>", params.RichMessage.HTML)
+}
+
 func TestSend_NonToolFeedbackDeletesTrackedProgressMessage(t *testing.T) {
 	caller := &stubCaller{
 		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
@@ -800,8 +828,13 @@ func TestSend_HTMLFallback_PerChunk(t *testing.T) {
 }
 
 func TestSend_HTMLFallback_BothFail(t *testing.T) {
+	callCount := 0
 	caller := &stubCaller{
 		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
+			callCount++
+			if callCount == 1 {
+				return nil, errors.New("Bad Request: can't parse entities")
+			}
 			return nil, errors.New("send failed")
 		},
 	}
@@ -817,11 +850,34 @@ func TestSend_HTMLFallback_BothFail(t *testing.T) {
 	assert.Equal(t, 2, len(caller.calls), "should have HTML attempt + plain text attempt")
 }
 
+func TestSend_NetworkFailureDoesNotRetryAsPlainText(t *testing.T) {
+	caller := &stubCaller{
+		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
+			return nil, errors.New("connection reset by peer")
+		},
+	}
+	ch := newTestChannel(t, caller)
+
+	_, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID:  "12345",
+		Content: "Hello",
+	})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, channels.ErrTemporary)
+	assert.Len(t, caller.calls, 1, "ambiguous network failures must not risk a duplicate send")
+}
+
 func TestSend_LongMessage_HTMLFallback_StopsOnError(t *testing.T) {
 	// With a long message that gets split into 2 chunks, if both HTML and
 	// plain text fail on the first chunk, Send should return early.
+	callCount := 0
 	caller := &stubCaller{
 		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
+			callCount++
+			if callCount == 1 {
+				return nil, errors.New("Bad Request: can't parse entities")
+			}
 			return nil, errors.New("send failed")
 		},
 	}
@@ -1049,7 +1105,7 @@ func TestSend_UsesContextTopicIDWhenChatIDDoesNotIncludeThread(t *testing.T) {
 func TestBeginStream_UpdateUsesForumThreadID(t *testing.T) {
 	caller := &stubCaller{
 		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
-			return &ta.Response{Ok: true, Result: []byte("true")}, nil
+			return successResponse(t), nil
 		},
 	}
 	ch := newTestChannel(t, caller)
@@ -1059,7 +1115,8 @@ func TestBeginStream_UpdateUsesForumThreadID(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, streamer.Update(context.Background(), "partial"))
 	require.Len(t, caller.calls, 1)
-	assert.Contains(t, caller.calls[0].URL, "sendMessageDraft")
+	assert.Contains(t, caller.calls[0].URL, "sendMessage")
+	assert.NotContains(t, caller.calls[0].URL, "sendMessageDraft")
 
 	var params struct {
 		ChatID          int64  `json:"chat_id"`
@@ -1075,7 +1132,7 @@ func TestBeginStream_UpdateUsesForumThreadID(t *testing.T) {
 func TestBeginStream_UsesDefaultThrottleWhenOnlyEnabled(t *testing.T) {
 	caller := &stubCaller{
 		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
-			return &ta.Response{Ok: true, Result: []byte("true")}, nil
+			return successResponse(t), nil
 		},
 	}
 	ch := newTestChannel(t, caller)
@@ -1089,15 +1146,15 @@ func TestBeginStream_UsesDefaultThrottleWhenOnlyEnabled(t *testing.T) {
 	require.Len(t, caller.calls, 1, "second small update should be throttled by defaults")
 }
 
-func TestBeginStream_UpdateReturnsErrorWhenDraftFails(t *testing.T) {
+func TestBeginStream_UpdateReturnsErrorWhenPreviewFails(t *testing.T) {
 	callCount := 0
 	caller := &stubCaller{
 		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
 			callCount++
 			if callCount == 1 {
-				return nil, errors.New("draft unsupported")
+				return nil, errors.New("preview unavailable")
 			}
-			return &ta.Response{Ok: true, Result: []byte("true")}, nil
+			return successResponse(t), nil
 		},
 	}
 	ch := newTestChannel(t, caller)
@@ -1108,27 +1165,16 @@ func TestBeginStream_UpdateReturnsErrorWhenDraftFails(t *testing.T) {
 
 	err = streamer.Update(context.Background(), "partial")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "draft unsupported")
+	assert.Contains(t, err.Error(), "preview unavailable")
 
 	streamer.Cancel(context.Background())
-	require.Len(t, caller.calls, 2)
-	assert.Contains(t, caller.calls[1].URL, "sendMessageDraft")
-
-	var params struct {
-		ChatID  int64  `json:"chat_id"`
-		DraftID int    `json:"draft_id"`
-		Text    string `json:"text"`
-	}
-	require.NoError(t, json.Unmarshal(caller.calls[1].Data.BodyRaw, &params))
-	assert.Equal(t, int64(12345), params.ChatID)
-	assert.NotZero(t, params.DraftID)
-	assert.Equal(t, " ", params.Text)
+	require.Len(t, caller.calls, 1, "a failed initial preview has nothing to delete")
 }
 
-func TestBeginStream_CancelClearsExistingDraft(t *testing.T) {
+func TestBeginStream_CancelDeletesExistingPreview(t *testing.T) {
 	caller := &stubCaller{
 		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
-			return &ta.Response{Ok: true, Result: []byte("true")}, nil
+			return successResponse(t), nil
 		},
 	}
 	ch := newTestChannel(t, caller)
@@ -1140,26 +1186,22 @@ func TestBeginStream_CancelClearsExistingDraft(t *testing.T) {
 	streamer.Cancel(context.Background())
 
 	require.Len(t, caller.calls, 2)
-	assert.Contains(t, caller.calls[1].URL, "sendMessageDraft")
+	assert.Contains(t, caller.calls[0].URL, "sendMessage")
+	assert.Contains(t, caller.calls[1].URL, "deleteMessage")
 
 	var params struct {
-		ChatID  int64  `json:"chat_id"`
-		DraftID int    `json:"draft_id"`
-		Text    string `json:"text"`
+		ChatID    int64 `json:"chat_id"`
+		MessageID int   `json:"message_id"`
 	}
 	require.NoError(t, json.Unmarshal(caller.calls[1].Data.BodyRaw, &params))
 	assert.Equal(t, int64(12345), params.ChatID)
-	assert.NotZero(t, params.DraftID)
-	assert.Equal(t, " ", params.Text)
+	assert.Equal(t, 1, params.MessageID)
 }
 
-func TestBeginStream_FinalizeClearsExistingDraft(t *testing.T) {
+func TestBeginStream_FinalizeEditsExistingPreviewInPlace(t *testing.T) {
 	caller := &stubCaller{
 		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
-			if strings.Contains(url, "sendMessage") && !strings.Contains(url, "sendMessageDraft") {
-				return successResponse(t), nil
-			}
-			return &ta.Response{Ok: true, Result: []byte("true")}, nil
+			return successResponse(t), nil
 		},
 	}
 	ch := newTestChannel(t, caller)
@@ -1170,20 +1212,19 @@ func TestBeginStream_FinalizeClearsExistingDraft(t *testing.T) {
 	require.NoError(t, streamer.Update(context.Background(), "partial"))
 	require.NoError(t, streamer.Finalize(context.Background(), "final"))
 
-	require.Len(t, caller.calls, 3)
-	assert.Contains(t, caller.calls[0].URL, "sendMessageDraft")
-	assert.Contains(t, caller.calls[1].URL, "sendMessage")
-	assert.Contains(t, caller.calls[2].URL, "sendMessageDraft")
+	require.Len(t, caller.calls, 2)
+	assert.Contains(t, caller.calls[0].URL, "sendMessage")
+	assert.Contains(t, caller.calls[1].URL, "editMessageText")
 
 	var params struct {
-		ChatID  int64  `json:"chat_id"`
-		DraftID int    `json:"draft_id"`
-		Text    string `json:"text"`
+		ChatID    int64  `json:"chat_id"`
+		MessageID int    `json:"message_id"`
+		Text      string `json:"text"`
 	}
-	require.NoError(t, json.Unmarshal(caller.calls[2].Data.BodyRaw, &params))
+	require.NoError(t, json.Unmarshal(caller.calls[1].Data.BodyRaw, &params))
 	assert.Equal(t, int64(12345), params.ChatID)
-	assert.NotZero(t, params.DraftID)
-	assert.Equal(t, " ", params.Text)
+	assert.Equal(t, 1, params.MessageID)
+	assert.Equal(t, "final", params.Text)
 }
 
 func TestBeginStream_FinalizeUsesForumThreadID(t *testing.T) {

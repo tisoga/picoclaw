@@ -4,6 +4,7 @@
     "model_group": "Models",
     "models": "Models",
     "credentials": "Credentials",
+    "quota": "Quota",
     "agent_group": "Agent",
     "hub": "Hub",
     "skills": "Skills",

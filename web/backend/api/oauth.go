@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -71,6 +72,8 @@ var (
 	oauthLoadConfig               = config.LoadConfig
 	oauthSaveConfig               = config.SaveConfig
 	oauthFetchAntigravityProject  = providers.FetchAntigravityProjectID
+	oauthFetchAntigravityQuota    = oauthprovider.FetchAntigravityQuota
+	oauthRefreshAccessToken       = auth.RefreshAccessToken
 	oauthFetchGoogleUserEmailFunc = fetchGoogleUserEmail
 )
 
@@ -914,25 +917,80 @@ func (h *Handler) handleGetOAuthQuota(w http.ResponseWriter, r *http.Request) {
 
 	cred, err := oauthGetCredential(provider)
 	if err != nil || cred == nil {
-		http.Error(w, "Not logged in", http.StatusUnauthorized)
+		http.Error(w, "Google Antigravity is not connected", http.StatusUnauthorized)
 		return
 	}
 
-	// Make sure we have a valid token
-	if cred.IsExpired() {
-		http.Error(w, "Token expired", http.StatusUnauthorized)
+	if cred.NeedsRefresh() && cred.RefreshToken != "" {
+		refreshed, refreshErr := refreshAntigravityQuotaCredential(cred)
+		if refreshErr != nil {
+			if cred.IsExpired() {
+				http.Error(w, fmt.Sprintf("Antigravity session expired: %v", refreshErr), http.StatusUnauthorized)
+				return
+			}
+			logger.WarnCF("oauth", "Could not refresh Antigravity token before quota request", map[string]any{
+				"error": refreshErr.Error(),
+			})
+		} else {
+			cred = refreshed
+		}
+	} else if cred.IsExpired() {
+		http.Error(w, "Antigravity session expired; reconnect the account", http.StatusUnauthorized)
 		return
 	}
 
-	// This function uses the same token to fetch models, which returns the quota info.
-	models, err := oauthprovider.FetchAntigravityModels(cred.AccessToken, cred.ProjectID)
+	snapshot, err := oauthFetchAntigravityQuota(cred.AccessToken, cred.ProjectID)
+	if isAntigravityAuthError(err) && cred.RefreshToken != "" {
+		refreshed, refreshErr := refreshAntigravityQuotaCredential(cred)
+		if refreshErr == nil {
+			cred = refreshed
+			snapshot, err = oauthFetchAntigravityQuota(cred.AccessToken, cred.ProjectID)
+		}
+	}
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to fetch quota: %v", err), http.StatusInternalServerError)
+		status := http.StatusBadGateway
+		if isAntigravityAuthError(err) {
+			status = http.StatusUnauthorized
+		}
+		http.Error(w, fmt.Sprintf("Failed to fetch Antigravity quota: %v", err), status)
 		return
+	}
+	if snapshot.ProjectID != "" && snapshot.ProjectID != cred.ProjectID {
+		cred.ProjectID = snapshot.ProjectID
+		if saveErr := oauthSetCredential(provider, cred); saveErr != nil {
+			logger.WarnCF("oauth", "Could not persist Antigravity project ID", map[string]any{
+				"error": saveErr.Error(),
+			})
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"models": models,
+		"provider":             provider,
+		"display_name":         oauthProviderLabels[provider],
+		"email":                cred.Email,
+		"project_id":           snapshot.ProjectID,
+		"plan":                 snapshot.Plan,
+		"models":               snapshot.Models,
+		"updated_at":           oauthNow().UTC().Format(time.RFC3339),
+		"auto_refresh_seconds": 60,
 	})
+}
+
+func refreshAntigravityQuotaCredential(cred *auth.AuthCredential) (*auth.AuthCredential, error) {
+	refreshed, err := oauthRefreshAccessToken(cred, auth.GoogleAntigravityOAuthConfig())
+	if err != nil {
+		return nil, err
+	}
+	refreshed.Provider = oauthProviderGoogleAntigravity
+	if err := oauthSetCredential(oauthProviderGoogleAntigravity, refreshed); err != nil {
+		return nil, fmt.Errorf("saving refreshed credential: %w", err)
+	}
+	return refreshed, nil
+}
+
+func isAntigravityAuthError(err error) bool {
+	var apiErr *oauthprovider.AntigravityAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized
 }

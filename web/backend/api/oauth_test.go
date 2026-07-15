@@ -13,6 +13,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
+	oauthprovider "github.com/sipeed/picoclaw/pkg/providers/oauth"
 )
 
 func TestOAuthLoginRejectsUnsupportedMethod(t *testing.T) {
@@ -35,6 +36,64 @@ func TestOAuthLoginRejectsUnsupportedMethod(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestOAuthQuotaReturnsNormalizedAccountSnapshot(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	oauthGetCredential = func(string) (*auth.AuthCredential, error) {
+		return &auth.AuthCredential{
+			AccessToken: "access-token",
+			Provider:    oauthProviderGoogleAntigravity,
+			AuthMethod:  oauthMethodBrowser,
+			Email:       "user@example.com",
+			ProjectID:   "project-1",
+			ExpiresAt:   time.Now().Add(time.Hour),
+		}, nil
+	}
+	oauthFetchAntigravityQuota = func(token, projectID string) (*oauthprovider.AntigravityQuotaSnapshot, error) {
+		if token != "access-token" || projectID != "project-1" {
+			t.Fatalf("quota args = %q, %q", token, projectID)
+		}
+		return &oauthprovider.AntigravityQuotaSnapshot{
+			Plan:      "Google AI Pro",
+			ProjectID: projectID,
+			Models: []oauthprovider.AntigravityModelInfo{{
+				ID:                "gemini-3-flash-agent",
+				DisplayName:       "Gemini 3.5 Flash (High)",
+				RemainingFraction: 0.8,
+			}},
+		}, nil
+	}
+	oauthNow = func() time.Time { return time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC) }
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/oauth/quota?provider=antigravity", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Email     string                               `json:"email"`
+		Plan      string                               `json:"plan"`
+		ProjectID string                               `json:"project_id"`
+		UpdatedAt string                               `json:"updated_at"`
+		Models    []oauthprovider.AntigravityModelInfo `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Email != "user@example.com" || response.Plan != "Google AI Pro" || response.ProjectID != "project-1" {
+		t.Fatalf("response = %+v", response)
+	}
+	if response.UpdatedAt != "2026-07-15T10:00:00Z" || len(response.Models) != 1 {
+		t.Fatalf("response = %+v", response)
 	}
 }
 
@@ -316,6 +375,8 @@ func resetOAuthHooks(t *testing.T) {
 	origLoadConfig := oauthLoadConfig
 	origSaveConfig := oauthSaveConfig
 	origFetchProject := oauthFetchAntigravityProject
+	origFetchQuota := oauthFetchAntigravityQuota
+	origRefreshAccessToken := oauthRefreshAccessToken
 	origFetchGoogleEmail := oauthFetchGoogleUserEmailFunc
 
 	t.Cleanup(func() {
@@ -332,6 +393,8 @@ func resetOAuthHooks(t *testing.T) {
 		oauthLoadConfig = origLoadConfig
 		oauthSaveConfig = origSaveConfig
 		oauthFetchAntigravityProject = origFetchProject
+		oauthFetchAntigravityQuota = origFetchQuota
+		oauthRefreshAccessToken = origRefreshAccessToken
 		oauthFetchGoogleUserEmailFunc = origFetchGoogleEmail
 	})
 }

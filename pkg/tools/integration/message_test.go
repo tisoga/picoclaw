@@ -166,8 +166,27 @@ func TestMessageTool_Execute_MissingContent(t *testing.T) {
 	if !result.IsError {
 		t.Error("Expected IsError=true for missing content/media")
 	}
-	if result.ForLLM != "content or media is required" {
-		t.Errorf("Expected ForLLM 'content or media is required', got '%s'", result.ForLLM)
+	if result.ForLLM != "content, media, or poll is required" {
+		t.Errorf("Expected interactive-aware missing content error, got '%s'", result.ForLLM)
+	}
+}
+
+func TestMessageTool_Execute_Poll(t *testing.T) {
+	tool := NewMessageTool()
+	tool.SetSendCallback(func(context.Context, string, string, string, string, []bus.MediaPart) error { return nil })
+	called := false
+	tool.SetInteractiveSendCallback(func(_ context.Context, _, _, _, _ string, _ [][]bus.InlineButton, poll *bus.OutboundPoll) error {
+		called = true
+		if poll.Question != "Choose" || len(poll.Options) != 2 {
+			t.Fatal("unexpected poll")
+		}
+		return nil
+	})
+	result := tool.Execute(WithToolContext(context.Background(), "telegram", "1"), map[string]any{
+		"poll": map[string]any{"question": "Choose", "options": []any{"A", "B"}},
+	})
+	if result.IsError || !called {
+		t.Fatalf("poll send failed: %+v", result)
 	}
 }
 
@@ -250,9 +269,9 @@ func TestMessageTool_Parameters(t *testing.T) {
 	}
 
 	// Check required properties
-	required, ok := params["required"].([]string)
-	if !ok || len(required) != 1 || required[0] != "content" {
-		t.Fatal("Expected content-only required schema when local media is disabled")
+	anyOf, ok := params["anyOf"].([]map[string]any)
+	if !ok || len(anyOf) != 2 {
+		t.Fatal("Expected content/poll requirement when local media is disabled")
 	}
 
 	// Check content property
@@ -313,8 +332,8 @@ func TestMessageTool_Parameters_WithLocalMediaEnabled(t *testing.T) {
 		t.Error("Expected media type to be 'array'")
 	}
 	anyOf, ok := params["anyOf"].([]map[string]any)
-	if !ok || len(anyOf) != 2 {
-		t.Fatal("Expected anyOf content/media requirement")
+	if !ok || len(anyOf) != 3 {
+		t.Fatal("Expected anyOf content/media/poll requirement")
 	}
 	if _, ok := params["required"]; ok {
 		t.Fatal("did not expect top-level required content when media is enabled")

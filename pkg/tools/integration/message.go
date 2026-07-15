@@ -24,6 +24,8 @@ type SendCallbackWithContext func(
 	mediaParts []bus.MediaPart,
 ) error
 
+type InteractiveSendCallback func(ctx context.Context, channel, chatID, content, replyToMessageID string, buttons [][]bus.InlineButton, poll *bus.OutboundPoll) error
+
 type messageMediaArg struct {
 	Path     string
 	Type     string
@@ -37,15 +39,16 @@ type sentTarget struct {
 }
 
 type MessageTool struct {
-	sendCallback      SendCallbackWithContext
-	workspace         string
-	restrict          bool
-	maxFileSize       int
-	mediaStore        media.MediaStore
-	allowPaths        []*regexp.Regexp
-	localMediaEnabled bool
-	mu                sync.Mutex
-	sentTargets       map[string][]sentTarget
+	sendCallback        SendCallbackWithContext
+	interactiveCallback InteractiveSendCallback
+	workspace           string
+	restrict            bool
+	maxFileSize         int
+	mediaStore          media.MediaStore
+	allowPaths          []*regexp.Regexp
+	localMediaEnabled   bool
+	mu                  sync.Mutex
+	sentTargets         map[string][]sentTarget
 }
 
 func NewMessageTool() *MessageTool {
@@ -83,11 +86,25 @@ func (t *MessageTool) Parameters() map[string]any {
 			"type":        "string",
 			"description": "Optional: reply target message ID for channels that support threaded replies",
 		},
+		"buttons": map[string]any{
+			"type": "array", "description": "Optional Telegram inline-button rows.",
+			"items": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
+				"text": map[string]any{"type": "string"}, "callback_data": map[string]any{"type": "string"}, "url": map[string]any{"type": "string"},
+			}, "required": []string{"text"}}},
+		},
+		"poll": map[string]any{
+			"type": "object", "description": "Optional Telegram native poll.", "properties": map[string]any{
+				"question": map[string]any{"type": "string"}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "anonymous": map[string]any{"type": "boolean"},
+			}, "required": []string{"question", "options"},
+		},
 	}
 	params := map[string]any{
 		"type":       "object",
 		"properties": properties,
-		"required":   []string{"content"},
+		"anyOf": []map[string]any{
+			{"required": []string{"content"}},
+			{"required": []string{"poll"}},
+		},
 	}
 	if t.localMediaEnabled {
 		properties["media"] = map[string]any{
@@ -112,10 +129,10 @@ func (t *MessageTool) Parameters() map[string]any {
 				"required": []string{"path"},
 			},
 		}
-		delete(params, "required")
 		params["anyOf"] = []map[string]any{
 			{"required": []string{"content"}},
 			{"required": []string{"media"}},
+			{"required": []string{"poll"}},
 		}
 	}
 	return params
@@ -177,10 +194,22 @@ func (t *MessageTool) SetSendCallback(callback SendCallbackWithContext) {
 	t.sendCallback = callback
 }
 
+func (t *MessageTool) SetInteractiveSendCallback(callback InteractiveSendCallback) {
+	t.interactiveCallback = callback
+}
+
 func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
 	content, _ := args["content"].(string)
 	content = strings.TrimSpace(content)
 	mediaArgs, err := parseMessageMediaArgs(args["media"])
+	if err != nil {
+		return &ToolResult{ForLLM: err.Error(), IsError: true}
+	}
+	buttons, err := parseInlineButtons(args["buttons"])
+	if err != nil {
+		return &ToolResult{ForLLM: err.Error(), IsError: true}
+	}
+	poll, err := parseOutboundPoll(args["poll"])
 	if err != nil {
 		return &ToolResult{ForLLM: err.Error(), IsError: true}
 	}
@@ -190,8 +219,14 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 			IsError: true,
 		}
 	}
-	if content == "" && len(mediaArgs) == 0 {
-		return &ToolResult{ForLLM: "content or media is required", IsError: true}
+	if content == "" && len(mediaArgs) == 0 && poll == nil {
+		return &ToolResult{ForLLM: "content, media, or poll is required", IsError: true}
+	}
+	if len(mediaArgs) > 0 && (len(buttons) > 0 || poll != nil) {
+		return &ToolResult{ForLLM: "media cannot be combined with buttons or a poll", IsError: true}
+	}
+	if poll != nil && len(buttons) > 0 {
+		return &ToolResult{ForLLM: "buttons and poll cannot be combined", IsError: true}
 	}
 
 	channel, _ := args["channel"].(string)
@@ -218,11 +253,20 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		return &ToolResult{ForLLM: err.Error(), IsError: true, Err: err}
 	}
 
-	if err := t.sendCallback(ctx, channel, chatID, content, replyToMessageID, parts); err != nil {
+	var sendErr error
+	if len(buttons) > 0 || poll != nil {
+		if t.interactiveCallback == nil {
+			return &ToolResult{ForLLM: "interactive messages are not configured", IsError: true}
+		}
+		sendErr = t.interactiveCallback(ctx, channel, chatID, content, replyToMessageID, buttons, poll)
+	} else {
+		sendErr = t.sendCallback(ctx, channel, chatID, content, replyToMessageID, parts)
+	}
+	if sendErr != nil {
 		return &ToolResult{
-			ForLLM:  fmt.Sprintf("sending message: %v", err),
+			ForLLM:  fmt.Sprintf("sending message: %v", sendErr),
 			IsError: true,
-			Err:     err,
+			Err:     sendErr,
 		}
 	}
 
@@ -240,6 +284,61 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		ForLLM: status,
 		Silent: true,
 	}
+}
+
+func parseInlineButtons(raw any) ([][]bus.InlineButton, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	rows, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("buttons must be an array of rows")
+	}
+	result := make([][]bus.InlineButton, 0, len(rows))
+	for i, rawRow := range rows {
+		items, ok := rawRow.([]any)
+		if !ok {
+			return nil, fmt.Errorf("buttons[%d] must be an array", i)
+		}
+		row := make([]bus.InlineButton, 0, len(items))
+		for j, rawButton := range items {
+			obj, ok := rawButton.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("buttons[%d][%d] must be an object", i, j)
+			}
+			text, _ := obj["text"].(string)
+			callback, _ := obj["callback_data"].(string)
+			url, _ := obj["url"].(string)
+			row = append(row, bus.InlineButton{Text: strings.TrimSpace(text), CallbackData: callback, URL: strings.TrimSpace(url)})
+		}
+		result = append(result, row)
+	}
+	return result, nil
+}
+
+func parseOutboundPoll(raw any) (*bus.OutboundPoll, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("poll must be an object")
+	}
+	question, _ := obj["question"].(string)
+	rawOptions, ok := obj["options"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("poll.options must be an array")
+	}
+	options := make([]string, 0, len(rawOptions))
+	for i, rawOption := range rawOptions {
+		option, ok := rawOption.(string)
+		if !ok {
+			return nil, fmt.Errorf("poll.options[%d] must be a string", i)
+		}
+		options = append(options, strings.TrimSpace(option))
+	}
+	anonymous, _ := obj["anonymous"].(bool)
+	return &bus.OutboundPoll{Question: strings.TrimSpace(question), Options: options, Anonymous: anonymous}, nil
 }
 
 func parseMessageMediaArgs(raw any) ([]messageMediaArg, error) {

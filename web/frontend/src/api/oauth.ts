@@ -47,6 +47,25 @@ export interface OAuthLoginResponse {
   expires_at?: string
 }
 
+export interface AntigravityQuotaModel {
+  id: string
+  display_name: string
+  is_exhausted: boolean
+  remaining_fraction: number
+  reset_time: string
+}
+
+export interface AntigravityQuotaResponse {
+  provider: "google-antigravity"
+  display_name: string
+  email?: string
+  project_id?: string
+  plan: string
+  models: AntigravityQuotaModel[]
+  updated_at: string
+  auto_refresh_seconds: number
+}
+
 interface OAuthProvidersResponse {
   providers: OAuthProviderStatus[]
 }
@@ -64,6 +83,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export async function getOAuthProviders(): Promise<OAuthProvidersResponse> {
   return request<OAuthProvidersResponse>("/api/oauth/providers")
+}
+
+export async function getAntigravityQuota(): Promise<AntigravityQuotaResponse> {
+  return request<AntigravityQuotaResponse>(
+    "/api/oauth/quota?provider=google-antigravity",
+  )
 }
 
 export async function loginOAuth(

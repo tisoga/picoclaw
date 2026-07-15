@@ -2,8 +2,6 @@ package telegram
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,9 +15,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	"github.com/mymmrac/telego"
-	th "github.com/mymmrac/telego/telegohandler"
 	tu "github.com/mymmrac/telego/telegoutil"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
@@ -53,7 +51,6 @@ const (
 type TelegramChannel struct {
 	*channels.BaseChannel
 	bot       *telego.Bot
-	bh        *th.BotHandler
 	bc        *config.Channel
 	chatIDsMu sync.Mutex
 	chatIDs   map[string]int64
@@ -69,8 +66,13 @@ type TelegramChannel struct {
 	mediaGroupMu    sync.Mutex
 	mediaGroups     map[string]*telegramMediaGroup
 	mediaGroupDelay time.Duration
+	pollTargetsMu   sync.Mutex
+	pollTargets     map[string]telegramPollTarget
+	pollTargetOrder []string
 
-	spool *Spool
+	spool     *Spool
+	spoolDone chan struct{}
+	pollDone  chan struct{}
 }
 
 type telegramMediaGroup struct {
@@ -82,6 +84,11 @@ type telegramMediaGroup struct {
 type telegramMessageParts struct {
 	content    []string
 	mediaPaths []string
+}
+
+type telegramPollTarget struct {
+	chatID  string
+	topicID int
 }
 
 func NewTelegramChannel(
@@ -131,7 +138,7 @@ func NewTelegramChannel(
 		channels.WithReasoningChannelID(bc.ReasoningChannelID),
 	)
 
-	spool, err := NewSpool()
+	spool, err := NewSpool(channelName)
 	if err != nil {
 		logger.WarnCF("telegram", "Failed to initialize spool db, will run without persistence", map[string]any{
 			"error": err.Error(),
@@ -148,6 +155,7 @@ func NewTelegramChannel(
 
 		mediaGroups:     make(map[string]*telegramMediaGroup),
 		mediaGroupDelay: telegramMediaGroupDelay(telegramCfg),
+		pollTargets:     make(map[string]telegramPollTarget),
 	}
 	ch.progress = channels.NewToolFeedbackAnimator(ch.EditMessage)
 	return ch, nil
@@ -160,39 +168,167 @@ func telegramMediaGroupDelay(telegramCfg *config.TelegramSettings) time.Duration
 	return defaultMediaGroupDelay
 }
 
+func (c *TelegramChannel) telegramSenderAllowed(senderID string, chatID int64, topicID int, direct bool) bool {
+	if c.tgCfg == nil {
+		return c.IsAllowedSender(bus.SenderInfo{Platform: "telegram", PlatformID: senderID, CanonicalID: identity.BuildCanonicalID("telegram", senderID)})
+	}
+	policy := strings.ToLower(strings.TrimSpace(c.tgCfg.DMPolicy))
+	if direct && policy == "disabled" {
+		return false
+	}
+	if !direct && strings.EqualFold(strings.TrimSpace(c.tgCfg.GroupPolicy), "disabled") {
+		return false
+	}
+	allowed := c.IsAllowedSender(bus.SenderInfo{Platform: "telegram", PlatformID: senderID, CanonicalID: identity.BuildCanonicalID("telegram", senderID)})
+	if direct && policy == "open" {
+		return true
+	}
+	if !direct {
+		if strings.EqualFold(strings.TrimSpace(c.tgCfg.GroupPolicy), "open") {
+			allowed = true
+		}
+		g, ok := c.tgCfg.Groups[strconv.FormatInt(chatID, 10)]
+		if !ok {
+			g, ok = c.tgCfg.Groups["*"]
+		}
+		if strings.EqualFold(strings.TrimSpace(c.tgCfg.GroupPolicy), "allowlist") && !ok {
+			return false
+		}
+		if ok && len(g.AllowFrom) > 0 {
+			allowed = false
+			for _, v := range g.AllowFrom {
+				if v == "*" || v == senderID {
+					allowed = true
+					break
+				}
+			}
+		}
+		if ok {
+			if g.Enabled != nil && !*g.Enabled {
+				return false
+			}
+			if topic, exists := g.Topics[strconv.Itoa(topicID)]; exists {
+				if topic.Enabled != nil && !*topic.Enabled {
+					return false
+				}
+				if len(topic.AllowFrom) > 0 {
+					allowed = false
+					for _, v := range topic.AllowFrom {
+						if v == "*" || v == senderID {
+							allowed = true
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	return allowed
+}
+
+func (c *TelegramChannel) telegramRequireMention(chatID int64, topicID int) *bool {
+	if c.tgCfg == nil {
+		return nil
+	}
+	g, ok := c.tgCfg.Groups[strconv.FormatInt(chatID, 10)]
+	if !ok {
+		g, ok = c.tgCfg.Groups["*"]
+	}
+	if !ok {
+		return nil
+	}
+	if topic, exists := g.Topics[strconv.Itoa(topicID)]; exists && topic.RequireMention != nil {
+		return topic.RequireMention
+	}
+	return g.RequireMention
+}
+
+// SendInlineKeyboard sends a small inline-keyboard message. Callback data is
+// delivered as an inbound event and is capped by Telegram at 64 bytes.
+func (c *TelegramChannel) SendInlineKeyboard(ctx context.Context, chatID string, content string, rows [][]telego.InlineKeyboardButton) (string, error) {
+	cid, threadID, err := parseTelegramChatID(chatID)
+	if err != nil {
+		return "", err
+	}
+	if len(rows) > 8 {
+		rows = rows[:8]
+	}
+	markup := &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
+	params := tu.Message(tu.ID(cid), content).WithReplyMarkup(markup)
+	params.MessageThreadID = threadID
+	m, err := c.bot.SendMessage(ctx, params)
+	if err != nil {
+		return "", err
+	}
+	return strconv.Itoa(m.MessageID), nil
+}
+
+func (c *TelegramChannel) SendPoll(ctx context.Context, chatID string, question string, options []string, anonymous bool) (string, error) {
+	cid, threadID, err := parseTelegramChatID(chatID)
+	if err != nil {
+		return "", err
+	}
+	if len(options) < 2 || len(options) > 12 {
+		return "", fmt.Errorf("telegram polls require 2-12 options")
+	}
+	input := make([]telego.InputPollOption, 0, len(options))
+	for _, option := range options {
+		input = append(input, telego.InputPollOption{Text: option})
+	}
+	m, err := c.bot.SendPoll(ctx, &telego.SendPollParams{ChatID: tu.ID(cid), MessageThreadID: threadID, Question: question, Options: input, IsAnonymous: &anonymous})
+	if err != nil {
+		return "", err
+	}
+	if m.Poll != nil {
+		c.rememberPollTarget(m.Poll.ID, strconv.FormatInt(cid, 10), threadID)
+	}
+	return strconv.Itoa(m.MessageID), nil
+}
+
+func (c *TelegramChannel) rememberPollTarget(pollID, chatID string, topicID int) {
+	if pollID == "" {
+		return
+	}
+	c.pollTargetsMu.Lock()
+	defer c.pollTargetsMu.Unlock()
+	if c.pollTargets == nil {
+		c.pollTargets = make(map[string]telegramPollTarget)
+	}
+	if _, exists := c.pollTargets[pollID]; !exists {
+		c.pollTargetOrder = append(c.pollTargetOrder, pollID)
+	}
+	c.pollTargets[pollID] = telegramPollTarget{chatID: chatID, topicID: topicID}
+	for len(c.pollTargetOrder) > 128 {
+		oldest := c.pollTargetOrder[0]
+		c.pollTargetOrder = c.pollTargetOrder[1:]
+		delete(c.pollTargets, oldest)
+	}
+}
+
+func (c *TelegramChannel) pollTarget(pollID string) (telegramPollTarget, bool) {
+	c.pollTargetsMu.Lock()
+	defer c.pollTargetsMu.Unlock()
+	target, ok := c.pollTargets[pollID]
+	return target, ok
+}
+
+func (c *TelegramChannel) ReactToMessage(ctx context.Context, chatID, messageID string) (string, error) {
+	cid, _, err := parseTelegramChatID(chatID)
+	if err != nil {
+		return "", err
+	}
+	mid, err := strconv.Atoi(messageID)
+	if err != nil {
+		return "", err
+	}
+	err = c.bot.SetMessageReaction(ctx, &telego.SetMessageReactionParams{ChatID: tu.ID(cid), MessageID: mid, Reaction: []telego.ReactionType{&telego.ReactionTypeEmoji{Type: telego.ReactionEmoji, Emoji: "👍"}}})
+	return messageID, err
+}
+
 func (c *TelegramChannel) Start(ctx context.Context) error {
 	logger.InfoC("telegram", "Starting Telegram bot (polling mode)...")
 
 	c.ctx, c.cancel = context.WithCancel(ctx)
-
-	updates, err := c.bot.UpdatesViaLongPolling(c.ctx, &telego.GetUpdatesParams{
-		Timeout: 30,
-	})
-	if err != nil {
-		c.cancel()
-		return fmt.Errorf("failed to start long polling: %w", err)
-	}
-
-	bh, err := th.NewBotHandler(c.bot, updates)
-	if err != nil {
-		c.cancel()
-		return fmt.Errorf("failed to create bot handler: %w", err)
-	}
-	c.bh = bh
-
-	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
-		if c.spool != nil {
-			if err := c.spool.Enqueue(&message); err != nil {
-				logger.WarnCF("telegram", "Failed to enqueue message to spool", map[string]any{
-					"error": err.Error(),
-				})
-				// Fallback: process directly if spool fails
-				return c.handleMessage(ctx, &message)
-			}
-			return nil
-		}
-		return c.handleMessage(ctx, &message)
-	}, th.AnyMessage())
 
 	c.SetRunning(true)
 	logger.InfoCF("telegram", "Telegram bot connected", map[string]any{
@@ -200,17 +336,19 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 	})
 
 	if c.spool != nil {
-		go c.processSpoolWorker()
+		c.spoolDone = make(chan struct{})
+		go func() {
+			defer close(c.spoolDone)
+			c.processSpoolWorker()
+		}()
 	}
 
 	c.startCommandRegistration(c.ctx, commands.BuiltinDefinitions())
 
+	c.pollDone = make(chan struct{})
 	go func() {
-		if err = bh.Start(); err != nil {
-			logger.ErrorCF("telegram", "Bot handler failed", map[string]any{
-				"error": err.Error(),
-			})
-		}
+		defer close(c.pollDone)
+		c.pollUpdates()
 	}()
 
 	return nil
@@ -220,15 +358,15 @@ func (c *TelegramChannel) Stop(ctx context.Context) error {
 	logger.InfoC("telegram", "Stopping Telegram bot...")
 	c.SetRunning(false)
 
-	// Stop the bot handler
-	if c.bh != nil {
-		_ = c.bh.StopWithContext(ctx)
-	}
-	c.flushPendingMediaGroups(ctx)
-
-	// Cancel our context (stops long polling)
+	// Cancel polling and spool processing before closing their shared resources.
 	if c.cancel != nil {
 		c.cancel()
+	}
+	c.flushPendingMediaGroups(ctx)
+	waitForTelegramWorker(ctx, c.pollDone)
+	waitForTelegramWorker(ctx, c.spoolDone)
+	if c.spool != nil {
+		_ = c.spool.Close()
 	}
 	if c.progress != nil {
 		c.progress.StopAll()
@@ -238,6 +376,164 @@ func (c *TelegramChannel) Stop(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func waitForTelegramWorker(ctx context.Context, done <-chan struct{}) {
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+// pollUpdates commits each message to the local spool before advancing the
+// getUpdates offset. Telegram may redeliver the last batch after a crash; the
+// spool's update_id uniqueness makes that replay idempotent.
+func (c *TelegramChannel) pollUpdates() {
+	defer c.SetRunning(false)
+	offset := 0
+	retryDelay := time.Second
+	for c.ctx.Err() == nil {
+		requestCtx, cancel := context.WithTimeout(c.ctx, 45*time.Second)
+		updates, err := c.bot.GetUpdates(requestCtx, &telego.GetUpdatesParams{
+			Offset:         offset,
+			Timeout:        30,
+			AllowedUpdates: []string{"message", "callback_query", "message_reaction", "poll_answer"},
+		})
+		cancel()
+		if err != nil {
+			if c.ctx.Err() != nil {
+				return
+			}
+			logger.WarnCF("telegram", "Long polling failed; retrying", map[string]any{
+				"error": err.Error(),
+				"delay": retryDelay.String(),
+			})
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-c.ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if retryDelay < 30*time.Second {
+				retryDelay *= 2
+				if retryDelay > 30*time.Second {
+					retryDelay = 30 * time.Second
+				}
+			}
+			continue
+		}
+
+		retryDelay = time.Second
+		for _, update := range updates {
+			if update.Message != nil {
+				if c.spool != nil {
+					if err := c.spool.Enqueue(update.UpdateID, update.Message); err != nil {
+						logger.WarnCF("telegram", "Failed to enqueue message to spool", map[string]any{
+							"error":     err.Error(),
+							"update_id": update.UpdateID,
+						})
+						if err := c.handleMessage(c.ctx, update.Message); err != nil {
+							logger.WarnCF("telegram", "Failed to process unspooled message", map[string]any{
+								"error": err.Error(),
+							})
+							return
+						}
+					}
+				} else if err := c.handleMessage(c.ctx, update.Message); err != nil {
+					logger.WarnCF("telegram", "Failed to process message", map[string]any{
+						"error": err.Error(),
+					})
+					return
+				}
+			}
+			if update.CallbackQuery != nil {
+				c.handleCallbackQuery(update.CallbackQuery)
+			}
+			if update.MessageReaction != nil {
+				c.handleReactionUpdate(update.MessageReaction)
+			}
+			if update.PollAnswer != nil {
+				c.handlePollAnswer(update.PollAnswer)
+			}
+			if update.UpdateID >= offset {
+				offset = update.UpdateID + 1
+			}
+		}
+	}
+}
+
+func (c *TelegramChannel) publishTelegramEvent(chatID, senderID, messageID, content, eventType string, topicID int) {
+	if strings.TrimSpace(chatID) == "" || strings.TrimSpace(content) == "" {
+		return
+	}
+	chatType := "group"
+	if chatID == senderID {
+		chatType = "direct"
+	}
+	ctx := bus.InboundContext{Channel: c.Name(), ChatID: chatID, ChatType: chatType, SenderID: senderID, MessageID: messageID,
+		Raw: map[string]string{"event_type": eventType}}
+	if topicID != 0 {
+		ctx.TopicID = strconv.Itoa(topicID)
+		ctx.ChatID = fmt.Sprintf("%s/%d", chatID, topicID)
+	}
+	sender := bus.SenderInfo{Platform: "telegram", PlatformID: senderID, CanonicalID: identity.BuildCanonicalID("telegram", senderID)}
+	c.HandleMessageWithContext(c.ctx, ctx.ChatID, content, nil, ctx, sender)
+}
+
+func (c *TelegramChannel) handleCallbackQuery(q *telego.CallbackQuery) {
+	if q == nil || q.Message == nil {
+		return
+	}
+	if c.ctx != nil {
+		_ = c.bot.AnswerCallbackQuery(c.ctx, &telego.AnswerCallbackQueryParams{CallbackQueryID: q.ID})
+	}
+	chat := q.Message.GetChat()
+	if chat.ID == 0 {
+		return
+	}
+	threadID := 0
+	if m := q.Message.Message(); m != nil {
+		threadID = m.MessageThreadID
+	}
+	if !c.telegramSenderAllowed(strconv.FormatInt(q.From.ID, 10), chat.ID, threadID, chat.Type == "private") {
+		return
+	}
+	c.publishTelegramEvent(strconv.FormatInt(chat.ID, 10), strconv.FormatInt(q.From.ID, 10), strconv.Itoa(q.Message.GetMessageID()), q.Data, "callback", threadID)
+}
+
+func (c *TelegramChannel) handleReactionUpdate(r *telego.MessageReactionUpdated) {
+	if r == nil {
+		return
+	}
+	senderID := "anonymous"
+	if r.User != nil {
+		senderID = strconv.FormatInt(r.User.ID, 10)
+	}
+	if r.User != nil && !c.telegramSenderAllowed(senderID, r.Chat.ID, 0, r.Chat.Type == "private") {
+		return
+	}
+	c.publishTelegramEvent(strconv.FormatInt(r.Chat.ID, 10), senderID, strconv.Itoa(r.MessageID), fmt.Sprintf("reaction changed: %d -> %d", len(r.OldReaction), len(r.NewReaction)), "reaction", 0)
+}
+
+func (c *TelegramChannel) handlePollAnswer(p *telego.PollAnswer) {
+	if p == nil || p.User == nil {
+		return
+	}
+	senderID := strconv.FormatInt(p.User.ID, 10)
+	target, ok := c.pollTarget(p.PollID)
+	if !ok {
+		return
+	}
+	chatID, err := strconv.ParseInt(target.chatID, 10, 64)
+	if err != nil || !c.telegramSenderAllowed(senderID, chatID, target.topicID, chatID == p.User.ID) {
+		return
+	}
+	content := fmt.Sprintf("poll %s answer: %v", p.PollID, p.OptionIDs)
+	c.publishTelegramEvent(target.chatID, senderID, p.PollID, content, "poll_answer", target.topicID)
 }
 
 func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
@@ -250,6 +546,28 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]
 	chatID, threadID, err := resolveTelegramOutboundTarget(msg.ChatID, &msg.Context)
 	if err != nil {
 		return nil, fmt.Errorf("invalid chat ID %s: %w", msg.ChatID, channels.ErrSendFailed)
+	}
+	compositeTarget := strconv.FormatInt(chatID, 10)
+	if threadID != 0 {
+		compositeTarget = fmt.Sprintf("%s/%d", compositeTarget, threadID)
+	}
+	if msg.Poll != nil {
+		pollID, pollErr := c.SendPoll(ctx, compositeTarget, msg.Poll.Question, msg.Poll.Options, msg.Poll.Anonymous)
+		if pollErr != nil {
+			return nil, pollErr
+		}
+		return []string{pollID}, nil
+	}
+	if len(msg.Buttons) > 0 {
+		rows, buttonErr := telegramInlineRows(msg.Buttons)
+		if buttonErr != nil {
+			return nil, buttonErr
+		}
+		messageID, sendErr := c.SendInlineKeyboard(ctx, compositeTarget, msg.Content, rows)
+		if sendErr != nil {
+			return nil, sendErr
+		}
+		return []string{messageID}, nil
 	}
 
 	if msg.Content == "" {
@@ -375,6 +693,30 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]
 	return messageIDs, nil
 }
 
+func telegramInlineRows(rows [][]bus.InlineButton) ([][]telego.InlineKeyboardButton, error) {
+	if len(rows) > 8 {
+		return nil, fmt.Errorf("telegram inline keyboard supports at most 8 rows")
+	}
+	out := make([][]telego.InlineKeyboardButton, 0, len(rows))
+	for _, row := range rows {
+		if len(row) > 8 {
+			return nil, fmt.Errorf("telegram inline keyboard supports at most 8 buttons per row")
+		}
+		converted := make([]telego.InlineKeyboardButton, 0, len(row))
+		for _, button := range row {
+			if button.Text == "" || (button.URL == "") == (button.CallbackData == "") {
+				return nil, fmt.Errorf("telegram button requires text and exactly one action")
+			}
+			if len([]byte(button.CallbackData)) > 64 {
+				return nil, fmt.Errorf("telegram callback data exceeds 64 bytes")
+			}
+			converted = append(converted, telego.InlineKeyboardButton{Text: button.Text, URL: button.URL, CallbackData: button.CallbackData})
+		}
+		out = append(out, converted)
+	}
+	return out, nil
+}
+
 type sendChunkParams struct {
 	chatID        int64
 	threadID      int
@@ -390,6 +732,30 @@ func (c *TelegramChannel) sendChunk(
 	ctx context.Context,
 	params sendChunkParams,
 ) (string, error) {
+	if c.tgCfg.RichMessages && !params.useMarkdownV2 {
+		richParams := &telego.SendRichMessageParams{
+			ChatID:          tu.ID(params.chatID),
+			MessageThreadID: params.threadID,
+			RichMessage:     telego.InputRichMessage{HTML: params.content},
+		}
+		if params.replyToID != "" {
+			if mid, parseErr := strconv.Atoi(params.replyToID); parseErr == nil {
+				richParams.ReplyParameters = &telego.ReplyParameters{MessageID: mid}
+			}
+		}
+		if sent, richErr := c.bot.SendRichMessage(ctx, richParams); richErr == nil {
+			return strconv.Itoa(sent.MessageID), nil
+		} else {
+			if !strings.Contains(richErr.Error(), "Bad Request") &&
+				!strings.Contains(richErr.Error(), "Not Found") {
+				return "", fmt.Errorf("telegram rich send: %w", channels.ErrTemporary)
+			}
+			logger.WarnCF("telegram", "Rich message send failed; falling back to standard HTML", map[string]any{
+				"error": richErr.Error(),
+			})
+		}
+	}
+
 	tgMsg := tu.Message(tu.ID(params.chatID), params.content)
 	tgMsg.MessageThreadID = params.threadID
 	if params.useMarkdownV2 {
@@ -408,6 +774,9 @@ func (c *TelegramChannel) sendChunk(
 
 	pMsg, err := c.bot.SendMessage(ctx, tgMsg)
 	if err != nil {
+		if !strings.Contains(err.Error(), "Bad Request") {
+			return "", fmt.Errorf("telegram send: %w", channels.ErrTemporary)
+		}
 		logParseFailed(err, params.useMarkdownV2)
 
 		tgMsg.Text = params.mdFallback
@@ -479,7 +848,10 @@ func (c *TelegramChannel) EditMessage(ctx context.Context, chatID string, messag
 	}
 	parsedContent := parseContent(content, useMarkdownV2)
 	editMsg := tu.EditMessageText(tu.ID(cid), mid, parsedContent)
-	if useMarkdownV2 {
+	if c.tgCfg.RichMessages && !useMarkdownV2 {
+		editMsg.Text = ""
+		editMsg.RichMessage = &telego.InputRichMessage{HTML: parsedContent}
+	} else if useMarkdownV2 {
 		editMsg.WithParseMode(telego.ModeMarkdownV2)
 	} else {
 		editMsg.WithParseMode(telego.ModeHTML)
@@ -664,6 +1036,28 @@ func (c *TelegramChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMe
 	store := c.GetMediaStore()
 	if store == nil {
 		return nil, fmt.Errorf("no media store available: %w", channels.ErrSendFailed)
+	}
+	maxItems := 0
+	if c.tgCfg != nil {
+		maxItems = c.tgCfg.MaxAlbumItems
+	}
+	if maxItems > 0 && len(msg.Parts) > maxItems {
+		return nil, fmt.Errorf("telegram media limit: at most %d attachments", maxItems)
+	}
+	maxBytes := int64(0)
+	if c.tgCfg != nil && c.tgCfg.MediaMaxMB > 0 {
+		maxBytes = int64(c.tgCfg.MediaMaxMB) * 1024 * 1024
+	}
+	for _, part := range msg.Parts {
+		path, resolveErr := store.Resolve(part.Ref)
+		if resolveErr != nil {
+			continue
+		}
+		if maxBytes > 0 {
+			if info, statErr := os.Stat(path); statErr == nil && info.Size() > maxBytes {
+				return nil, fmt.Errorf("telegram media %s exceeds configured limit", part.Filename)
+			}
+		}
 	}
 
 	var messageIDs []string
@@ -976,6 +1370,13 @@ func (c *TelegramChannel) bufferMediaGroupMessage(ctx context.Context, message *
 		c.mediaGroups[key] = group
 	}
 	group.messages = append(group.messages, &msgCopy)
+	maxItems := 0
+	if c.tgCfg != nil {
+		maxItems = c.tgCfg.MaxAlbumItems
+	}
+	if maxItems > 0 && len(group.messages) > maxItems {
+		group.messages = group.messages[:maxItems]
+	}
 	group.generation++
 	generation := group.generation
 	if group.timer != nil {
@@ -1082,6 +1483,7 @@ func (c *TelegramChannel) handleMessages(ctx context.Context, messages []*telego
 	}
 
 	platformID := fmt.Sprintf("%d", user.ID)
+	chatID := message.Chat.ID
 	sender := bus.SenderInfo{
 		Platform:    "telegram",
 		PlatformID:  platformID,
@@ -1091,14 +1493,16 @@ func (c *TelegramChannel) handleMessages(ctx context.Context, messages []*telego
 	}
 
 	// check allowlist to avoid downloading attachments for rejected users
-	if !c.IsAllowedSender(sender) {
+	if !c.telegramSenderAllowed(platformID, chatID, message.MessageThreadID, message.Chat.Type == "private") {
 		logger.DebugCF("telegram", "Message rejected by allowlist", map[string]any{
 			"user_id": platformID,
 		})
 		return nil
 	}
+	if c.tgCfg != nil && c.tgCfg.AckReactions {
+		_ = c.bot.SetMessageReaction(ctx, &telego.SetMessageReactionParams{ChatID: tu.ID(chatID), MessageID: message.MessageID, Reaction: []telego.ReactionType{&telego.ReactionTypeEmoji{Type: telego.ReactionEmoji, Emoji: "👀"}}})
+	}
 
-	chatID := message.Chat.ID
 	c.chatIDsMu.Lock()
 	c.chatIDs[platformID] = chatID
 	c.chatIDsMu.Unlock()
@@ -1154,7 +1558,7 @@ func (c *TelegramChannel) handleMessages(ctx context.Context, messages []*telego
 		if isMentioned {
 			content = c.stripBotMention(content)
 		}
-		respond, cleaned := c.ShouldRespondInGroup(isMentioned, content)
+		respond, cleaned := c.ShouldRespondInGroupWithMentionOverride(isMentioned, content, c.telegramRequireMention(chatID, message.MessageThreadID))
 		if !respond {
 			return nil
 		}
@@ -1442,9 +1846,18 @@ func (c *TelegramChannel) downloadFileWithInfo(file *telego.File, ext string) st
 	if file.FilePath == "" {
 		return ""
 	}
+	maxBytes := int64(0)
+	if c.tgCfg != nil && c.tgCfg.MediaMaxMB > 0 {
+		maxBytes = int64(c.tgCfg.MediaMaxMB) * 1024 * 1024
+	}
+	if maxBytes > 0 && file.FileSize > 0 && int64(file.FileSize) > maxBytes {
+		logger.WarnCF("telegram", "Rejected oversized media", map[string]any{"size": file.FileSize, "limit": maxBytes})
+		return ""
+	}
 
 	url := c.bot.FileDownloadURL(file.FilePath)
-	logger.DebugCF("telegram", "File URL", map[string]any{"url": url})
+	// The download URL embeds the bot token. Never write it to logs.
+	logger.DebugCF("telegram", "Downloading Telegram file", map[string]any{"file_path": file.FilePath})
 
 	// Use FilePath as filename for better identification
 	filename := file.FilePath + ext
@@ -1593,10 +2006,8 @@ func (c *TelegramChannel) isBotMentioned(message *telego.Message) bool {
 	if c.bot != nil {
 		botUsername = c.bot.Username()
 	}
-	runes := []rune(text)
-
 	for _, entity := range entities {
-		entityText, ok := telegramEntityText(runes, entity)
+		entityText, ok := telegramEntityText(text, entity)
 		if !ok {
 			continue
 		}
@@ -1626,15 +2037,17 @@ func telegramEntityTextAndList(message *telego.Message) (string, []telego.Messag
 	return message.Caption, message.CaptionEntities
 }
 
-func telegramEntityText(runes []rune, entity telego.MessageEntity) (string, bool) {
+func telegramEntityText(text string, entity telego.MessageEntity) (string, bool) {
 	if entity.Offset < 0 || entity.Length <= 0 {
 		return "", false
 	}
+	// Telegram entity offsets are UTF-16 code units, not Unicode code points.
+	units := utf16.Encode([]rune(text))
 	end := entity.Offset + entity.Length
-	if entity.Offset >= len(runes) || end > len(runes) {
+	if entity.Offset >= len(units) || end > len(units) {
 		return "", false
 	}
-	return string(runes[entity.Offset:end]), true
+	return string(utf16.Decode(units[entity.Offset:end])), true
 }
 
 func isBotCommandEntityForThisBot(entityText, botUsername string) bool {
@@ -1687,26 +2100,26 @@ func (c *TelegramChannel) BeginStream(ctx context.Context, chatID string) (chann
 		bot:              c.bot,
 		chatID:           cid,
 		threadID:         threadID,
-		draftID:          cryptoRandInt(),
+		richMessages:     c.tgCfg.RichMessages,
 		throttleInterval: time.Duration(streamCfg.ThrottleSeconds) * time.Second,
 		minGrowth:        streamCfg.MinGrowthChars,
 	}, nil
 }
 
-// telegramStreamer streams partial LLM output via Telegram's sendMessageDraft API.
-// Draft update failures are returned to the agent, which decides whether the
-// stream was already visible enough to keep or should fall back to Chat().
+// telegramStreamer streams by sending one persistent preview and editing it in
+// place. Unlike sendMessageDraft, this works in DMs, groups, and forum topics,
+// and finalization does not create a duplicate answer bubble.
 type telegramStreamer struct {
 	bot              *telego.Bot
 	chatID           int64
 	threadID         int
-	draftID          int
+	richMessages     bool
 	throttleInterval time.Duration
 	minGrowth        int
 	lastLen          int
 	lastAt           time.Time
 	failed           bool
-	draftTouched     bool
+	messageID        int
 	mu               sync.Mutex
 }
 
@@ -1715,7 +2128,11 @@ func (s *telegramStreamer) Update(ctx context.Context, content string) error {
 	defer s.mu.Unlock()
 
 	if s.failed {
-		return fmt.Errorf("telegram streaming disabled after previous draft failure")
+		return fmt.Errorf("telegram streaming disabled after previous preview failure")
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
 	}
 
 	// Throttle: skip if not enough time or content has passed
@@ -1725,22 +2142,19 @@ func (s *telegramStreamer) Update(ctx context.Context, content string) error {
 		return nil
 	}
 
-	htmlContent := markdownToTelegramHTML(content)
-	s.draftTouched = true
-
-	err := s.bot.SendMessageDraft(ctx, &telego.SendMessageDraftParams{
-		ChatID:          s.chatID,
-		MessageThreadID: s.threadID,
-		DraftID:         s.draftID,
-		Text:            htmlContent,
-		ParseMode:       telego.ModeHTML,
-	})
+	preview := fitTelegramStreamPreview(content)
+	var err error
+	if s.messageID == 0 {
+		s.messageID, err = s.send(ctx, preview)
+	} else {
+		err = s.edit(ctx, s.messageID, preview)
+	}
 	if err != nil {
-		logger.WarnCF("telegram", "sendMessageDraft failed, disabling streaming", map[string]any{
+		logger.WarnCF("telegram", "Telegram preview update failed, disabling streaming", map[string]any{
 			"error": err.Error(),
 		})
 		s.failed = true
-		return fmt.Errorf("telegram draft update: %w", err)
+		return fmt.Errorf("telegram preview update: %w", err)
 	}
 
 	s.lastLen = len(content)
@@ -1749,57 +2163,120 @@ func (s *telegramStreamer) Update(ctx context.Context, content string) error {
 }
 
 func (s *telegramStreamer) Finalize(ctx context.Context, content string) error {
-	htmlContent := markdownToTelegramHTML(content)
-	tgMsg := tu.Message(tu.ID(s.chatID), htmlContent)
-	tgMsg.MessageThreadID = s.threadID
-	tgMsg.ParseMode = telego.ModeHTML
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if _, err := s.bot.SendMessage(ctx, tgMsg); err != nil {
-		// Fallback to plain text
-		tgMsg.ParseMode = ""
-		if _, err = s.bot.SendMessage(ctx, tgMsg); err != nil {
-			logger.ErrorCF("telegram", "Finalize failed after HTML and plain-text attempts", map[string]any{
-				"chat_id": s.chatID,
-				"error":   err.Error(),
-				"len":     len(content),
-			})
+	chunks := channels.SplitMessage(strings.TrimSpace(content), 4000)
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	if s.messageID == 0 {
+		messageID, err := s.send(ctx, chunks[0])
+		if err != nil {
 			return fmt.Errorf("telegram finalize: %w", err)
 		}
+		s.messageID = messageID
+	} else if err := s.edit(ctx, s.messageID, chunks[0]); err != nil {
+		// The preview is only provisional. If it cannot be finalized, remove it
+		// and fall back to a normal final send.
+		_ = s.bot.DeleteMessage(ctx, &telego.DeleteMessageParams{
+			ChatID: tu.ID(s.chatID), MessageID: s.messageID,
+		})
+		s.messageID = 0
+		messageID, sendErr := s.send(ctx, chunks[0])
+		if sendErr != nil {
+			return fmt.Errorf("telegram finalize after edit failure: %w", sendErr)
+		}
+		s.messageID = messageID
 	}
-	s.Cancel(ctx)
+
+	for _, chunk := range chunks[1:] {
+		if _, err := s.send(ctx, chunk); err != nil {
+			return fmt.Errorf("telegram finalize continuation: %w", err)
+		}
+	}
 	return nil
 }
 
 func (s *telegramStreamer) Cancel(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.clearDraft(ctx)
-}
-
-func (s *telegramStreamer) clearDraft(ctx context.Context) {
-	if !s.draftTouched {
+	if s.messageID == 0 {
 		return
 	}
-	if err := s.bot.SendMessageDraft(ctx, &telego.SendMessageDraftParams{
-		ChatID:          s.chatID,
-		MessageThreadID: s.threadID,
-		DraftID:         s.draftID,
-		Text:            " ",
-	}); err != nil {
-		logger.DebugCF("telegram", "failed to clear streaming draft", map[string]any{
-			"chat_id": s.chatID,
-			"error":   err.Error(),
-		})
-	}
-	s.lastLen = 0
-	s.draftTouched = false
+	_ = s.bot.DeleteMessage(ctx, &telego.DeleteMessageParams{
+		ChatID: tu.ID(s.chatID), MessageID: s.messageID,
+	})
+	s.messageID = 0
 }
 
-// cryptoRandInt returns a non-zero random int using crypto/rand.
-func cryptoRandInt() int {
-	var b [4]byte
-	_, _ = rand.Read(b[:])
-	return int(binary.BigEndian.Uint32(b[:])) | 1 // ensure non-zero
+func (s *telegramStreamer) send(ctx context.Context, content string) (int, error) {
+	parsed := markdownToTelegramHTML(content)
+	if s.richMessages {
+		sent, err := s.bot.SendRichMessage(ctx, &telego.SendRichMessageParams{
+			ChatID:          tu.ID(s.chatID),
+			MessageThreadID: s.threadID,
+			RichMessage:     telego.InputRichMessage{HTML: parsed},
+		})
+		if err == nil {
+			return sent.MessageID, nil
+		}
+		logger.WarnCF("telegram", "Rich preview send failed; falling back to standard HTML", map[string]any{
+			"error": err.Error(),
+		})
+	}
+	msg := tu.Message(tu.ID(s.chatID), parsed)
+	msg.MessageThreadID = s.threadID
+	msg.ParseMode = telego.ModeHTML
+	sent, err := s.bot.SendMessage(ctx, msg)
+	if err != nil && strings.Contains(err.Error(), "Bad Request") {
+		msg.Text = content
+		msg.ParseMode = ""
+		sent, err = s.bot.SendMessage(ctx, msg)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return sent.MessageID, nil
+}
+
+func (s *telegramStreamer) edit(ctx context.Context, messageID int, content string) error {
+	parsed := markdownToTelegramHTML(content)
+	params := tu.EditMessageText(tu.ID(s.chatID), messageID, parsed)
+	if s.richMessages {
+		params.Text = ""
+		params.RichMessage = &telego.InputRichMessage{HTML: parsed}
+	} else {
+		params.ParseMode = telego.ModeHTML
+	}
+	_, err := s.bot.EditMessageText(ctx, params)
+	if err != nil && strings.Contains(err.Error(), "message is not modified") {
+		return nil
+	}
+	if err != nil && strings.Contains(err.Error(), "Bad Request") {
+		_, err = s.bot.EditMessageText(ctx, tu.EditMessageText(tu.ID(s.chatID), messageID, content))
+	}
+	return err
+}
+
+func fitTelegramStreamPreview(content string) string {
+	if len([]rune(markdownToTelegramHTML(content))) <= 4096 {
+		return content
+	}
+	low, high := 1, len([]rune(content))
+	best := utils.Truncate(content, 1)
+	for low <= high {
+		mid := (low + high) / 2
+		candidate := utils.Truncate(content, mid)
+		if len([]rune(markdownToTelegramHTML(candidate))) <= 4096 {
+			best = candidate
+			low = mid + 1
+		} else {
+			high = mid - 1
+		}
+	}
+	return best
 }
 
 // isPostConnectError identifies network errors that likely occurred after
@@ -1869,19 +2346,31 @@ func (c *TelegramChannel) processSpoolWorker() {
 				continue
 			}
 
-			// Process it exactly like normal
-			err = c.handleMessage(nil, &tgMsg)
+			// Process it exactly like normal. A real context is required for media
+			// downloads; passing nil here silently discarded single attachments.
+			err = c.handleMessage(c.ctx, &tgMsg)
 			if err != nil {
 				logger.WarnCF("telegram", "Failed to process spooled message", map[string]any{
 					"error": err.Error(),
 					"id":    msgRow.ID,
 				})
-				// If it failed more than 3 times, drop it to prevent poison messages
-				if msgRow.Attempts > 3 {
-					logger.ErrorCF("telegram", "Dropping poison message after 3 attempts", map[string]any{
-						"id": msgRow.ID,
+				attempt := msgRow.Attempts + 1
+				const maxAttempts = 5
+				if attempt >= maxAttempts {
+					logger.ErrorCF("telegram", "Dropping poison message after retry limit", map[string]any{
+						"id":       msgRow.ID,
+						"attempts": attempt,
 					})
 					_ = c.spool.Acknowledge(msgRow.ID)
+					continue
+				}
+				delay := 100 * time.Millisecond * time.Duration(1<<min(attempt-1, 5))
+				timer := time.NewTimer(delay)
+				select {
+				case <-c.ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
 				}
 			} else {
 				// Success! Remove from spool.

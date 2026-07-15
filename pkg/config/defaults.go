@@ -460,6 +460,9 @@ func DefaultConfig() *Config {
 			LoadImage: ToolConfig{
 				Enabled: true,
 			},
+			ImageGenerate: ToolConfig{
+				Enabled: true,
+			},
 			Message: MessageToolsConfig{
 				ToolConfig: ToolConfig{
 					Enabled: true,

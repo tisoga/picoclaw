@@ -216,6 +216,20 @@ func registerSharedTools(
 				defer pubCancel()
 				return msgBus.PublishOutbound(pubCtx, outboundMessage)
 			})
+			messageTool.SetInteractiveSendCallback(func(ctx context.Context, channel, chatID, content, replyToMessageID string, buttons [][]bus.InlineButton, poll *bus.OutboundPoll) error {
+				agentID, sessionKey, scope := outboundTurnMetadata(tools.ToolAgentID(ctx), tools.ToolSessionKey(ctx), tools.ToolSessionScope(ctx))
+				outbound := bus.OutboundMessage{
+					Channel: channel, ChatID: chatID, Context: bus.NewOutboundContext(channel, chatID, replyToMessageID),
+					AgentID: agentID, SessionKey: sessionKey, Scope: scope, Content: content,
+					ReplyToMessageID: replyToMessageID, Buttons: buttons, Poll: poll,
+				}
+				if al.channelManager != nil && channel != "" {
+					return al.channelManager.SendMessage(ctx, outbound)
+				}
+				pubCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				return msgBus.PublishOutbound(pubCtx, outbound)
+			})
 			agent.Tools.Register(messageTool)
 		}
 		if cfg.Tools.IsToolEnabled("reaction") {
@@ -263,6 +277,21 @@ func registerSharedTools(
 				allowReadPaths,
 			)
 			agent.Tools.Register(loadImageTool)
+		}
+
+		if cfg.Tools.IsToolEnabled("image_generate") {
+			if imageModel, err := resolvedModelConfig(cfg, agent.Model, agent.Workspace); err == nil {
+				agent.Tools.Register(tools.NewImageGenerationTool(imageModel, cfg.Agents.Defaults.GetMaxMediaSize(), provider))
+			} else {
+				// OAuth-backed providers may be injected without a model_list entry.
+				// Pass the active provider through so native image capabilities remain available.
+				imageTool := tools.NewImageGenerationTool(nil, cfg.Agents.Defaults.GetMaxMediaSize(), provider)
+				if imageTool.Available() {
+					agent.Tools.Register(imageTool)
+				} else {
+					logger.WarnCF("agent", "Image generation tool disabled: active model configuration unavailable", map[string]any{"error": err.Error()})
+				}
+			}
 		}
 
 		// Skill discovery and installation tools
