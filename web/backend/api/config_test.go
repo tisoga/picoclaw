@@ -1293,6 +1293,25 @@ func TestApplyConfigSecretsFromMap_TelegramToken(t *testing.T) {
 	}
 }
 
+func TestApplyConfigSecretsFromMap_GatewayWebhookToken(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Gateway.Webhook.Token = *config.NewSecureString("previous-token")
+
+	raw := map[string]any{
+		"gateway": map[string]any{
+			"webhook": map[string]any{
+				"token": "generated-token-from-ui",
+			},
+		},
+	}
+
+	applyConfigSecretsFromMap(cfg, raw)
+
+	if got := cfg.Gateway.Webhook.Token.String(); got != "generated-token-from-ui" {
+		t.Fatalf("gateway webhook token = %q, want submitted token", got)
+	}
+}
+
 func TestApplyConfigSecretsFromMap_TeamsWebhook(t *testing.T) {
 	// applyConfigSecretsFromMap recurses into nested maps to find
 	// SecureString fields at any depth (e.g. webhook_url inside webhooks map).

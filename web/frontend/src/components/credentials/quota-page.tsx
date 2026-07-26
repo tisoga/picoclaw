@@ -273,7 +273,7 @@ export function QuotaPage() {
               </h3>
               <p className="text-muted-foreground mx-auto mt-2 max-w-md text-sm">
                 {disconnected
-                  ? "Connect your Google Antigravity account before checking model quotas."
+                  ? "Connect your Antigravity account before checking model quotas."
                   : errorMessage ||
                     "The upstream quota service did not respond."}
               </p>
@@ -304,7 +304,7 @@ export function QuotaPage() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className="font-semibold">
-                        {query.data?.display_name ?? "Google Antigravity"}
+                        {query.data?.display_name ?? "Antigravity"}
                       </h3>
                       {query.data?.plan && (
                         <Badge variant="secondary">{query.data.plan}</Badge>

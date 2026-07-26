@@ -14,6 +14,7 @@
     "show_more_channels": "更多",
     "show_less_channels": "收起",
     "config": "配置",
+    "webhook": "Webhook",
     "logs": "日志"
   },
   "launcherLogin": {
@@ -178,7 +179,7 @@
         "description": "使用 Token 登录 Claude。"
       },
       "antigravity": {
-        "description": "使用浏览器 OAuth 登录 Google Cloud Code Assist。"
+        "description": "使用浏览器 OAuth 连接 Antigravity 账号。"
       }
     },
     "status": {

@@ -14,6 +14,7 @@
     "show_more_channels": "More",
     "show_less_channels": "Less",
     "config": "Config",
+    "webhook": "Webhook",
     "logs": "Logs"
   },
   "launcherLogin": {
@@ -178,7 +179,7 @@
         "description": "Uses token login for Claude access."
       },
       "antigravity": {
-        "description": "Uses browser OAuth for Google Cloud Code Assist."
+        "description": "Uses browser OAuth to connect your Antigravity account."
       }
     },
     "status": {
@@ -856,6 +857,25 @@
       "trusted_proxy_cidrs": "Trusted Proxy CIDRs",
       "trusted_proxy_cidrs_hint": "Only proxies from these CIDR ranges may provide client IP information such as X-Forwarded-For. Leave empty to ignore proxy client IP headers.",
       "trusted_proxy_cidrs_placeholder": "172.16.0.0/12\n127.0.0.1/32",
+      "webhook_description": "Let external services send notifications through PicoClaw's enabled channels.",
+      "webhook_enabled": "Enable Webhook",
+      "webhook_enabled_hint": "Mount an authenticated HTTP endpoint on the gateway for sending messages to channels.",
+      "webhook_guide_title": "How to use this webhook",
+      "webhook_guide_step_1": "Create a strong token, choose the channels external services may use, then save the configuration and restart the gateway if prompted.",
+      "webhook_guide_step_2": "Click Test Webhook and enter an enabled channel name, the destination Chat ID, and a message.",
+      "webhook_guide_step_3": "In your external service, send the same JSON fields to the endpoint shown below with an Authorization: Bearer <token> header.",
+      "webhook_guide_note": "This endpoint delivers the supplied message directly to the selected channel. It does not ask the AI agent to generate a response.",
+      "webhook_request_title": "Request format",
+      "webhook_request_hint": "All three JSON fields are required. Channel must be enabled and allowed; Chat ID identifies the destination within that channel.",
+      "webhook_token": "Token",
+      "webhook_token_hint": "Secret used to authenticate requests. Leave this field empty when editing to keep the existing token.",
+      "webhook_path": "Path",
+      "webhook_path_hint": "HTTP path for the endpoint. The default is /webhook/send.",
+      "webhook_allowed_channels": "Allowed Channels",
+      "webhook_allowed_channels_hint": "Enter one enabled channel name per line. Leave empty to allow every channel.",
+      "webhook_test": "Test Webhook",
+      "webhook_test_title": "Test Webhook",
+      "webhook_test_desc": "Send a real request through the saved gateway configuration. Save your changes and restart the gateway first if prompted.",
       "evolution_section_hint": "Let the agent learn from completed turns and prepare skill improvements.",
       "evolution_enabled": "Enable Evolution",
       "evolution_enabled_hint": "Record learning data for completed turns. Draft and apply modes can also generate skill updates.",
@@ -915,7 +935,8 @@
         "exec": "Run Commands",
         "cron": "Cron Tasks",
         "launcher": "Launcher",
-        "devices": "Devices"
+        "devices": "Devices",
+        "webhook": "Webhook"
       },
       "open_raw": "Raw Config",
       "back_to_visual": "Visual Config",

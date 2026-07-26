@@ -56,6 +56,7 @@ import {
 import { TestModelDialog } from "./test-model-dialog"
 
 interface EditForm {
+  modelName: string
   provider: string
   modelId: string
   apiKey: string
@@ -80,10 +81,12 @@ interface EditModelSheetProps {
   onClose: () => void
   onSaved: () => void
   providerOptions?: ModelProviderOption[]
+  existingModelNames: string[]
 }
 
 function buildInitialEditForm(model: ModelInfo): EditForm {
   return {
+    modelName: model.model_name,
     provider: getCanonicalProviderKey(model.provider),
     modelId: model.model,
     apiKey: "",
@@ -113,9 +116,11 @@ export function EditModelSheet({
   onClose,
   onSaved,
   providerOptions,
+  existingModelNames,
 }: EditModelSheetProps) {
   const { t } = useTranslation()
   const [form, setForm] = useState<EditForm>({
+    modelName: "",
     provider: "",
     modelId: "",
     apiKey: "",
@@ -319,6 +324,19 @@ export function EditModelSheet({
 
   const handleSave = async () => {
     if (!model) return
+    const modelName = form.modelName.trim()
+    if (!modelName) {
+      setError(t("models.add.errorRequired"))
+      return
+    }
+    if (
+      existingModelNames.some(
+        (name) => name !== model.model_name && name.trim() === modelName,
+      )
+    ) {
+      setError(t("models.add.errorDuplicateModelName"))
+      return
+    }
     if (!providerDef) {
       setError(t("models.field.providerInvalid"))
       return
@@ -366,7 +384,7 @@ export function EditModelSheet({
           ? { enabled: form.streamingEnabled }
           : undefined
       await updateModel(model.index, {
-        model_name: model.model_name,
+        model_name: modelName,
         provider: provider,
         model: modelId,
         api_base: submittedApiBase,
@@ -395,7 +413,7 @@ export function EditModelSheet({
       showSaveSuccessOrRestartToast(
         t,
         t("models.edit.saveSuccess"),
-        model.model_name,
+        modelName,
         gateway?.restartRequired === true,
       )
       onSaved()
@@ -436,6 +454,18 @@ export function EditModelSheet({
             ref={scrollContainerRef}
           >
             <div className="space-y-5 px-6 py-5">
+              <Field
+                label={t("models.add.modelName")}
+                hint={t("models.add.modelNameHint")}
+                required
+              >
+                <Input
+                  value={form.modelName}
+                  onChange={setField("modelName")}
+                  placeholder={t("models.add.modelNamePlaceholder")}
+                />
+              </Field>
+
               <Field
                 label={t("models.field.provider")}
                 hint={t("models.field.providerHint")}

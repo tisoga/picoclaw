@@ -654,6 +654,17 @@ func getSecretString(m map[string]any, key string) (string, bool) {
 }
 
 func applyConfigSecretsFromMap(cfg *config.Config, raw map[string]any) {
+	// Gateway webhook credentials are stored in the security sidecar just like
+	// channel credentials. SecurityCopyFrom restores the previous value, so an
+	// explicitly submitted replacement must be applied again before saving.
+	if gatewayMap, hasGateway := asMapField(raw, "gateway"); hasGateway {
+		if webhookMap, hasWebhook := asMapField(gatewayMap, "webhook"); hasWebhook {
+			if token, hasToken := getSecretString(webhookMap, "token"); hasToken {
+				cfg.Gateway.Webhook.Token.Set(token)
+			}
+		}
+	}
+
 	channelsMap, hasChannels := asMapField(raw, "channel_list")
 	if !hasChannels {
 		return

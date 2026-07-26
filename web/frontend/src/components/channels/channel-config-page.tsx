@@ -29,6 +29,7 @@ import { SlackForm } from "@/components/channels/channel-forms/slack-form"
 import { TelegramForm } from "@/components/channels/channel-forms/telegram-form"
 import { WecomForm } from "@/components/channels/channel-forms/wecom-form"
 import { WeixinForm } from "@/components/channels/channel-forms/weixin-form"
+import { WhatsAppNativeForm } from "@/components/channels/channel-forms/whatsapp-native-form"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
@@ -667,6 +668,15 @@ export function ChannelConfigPage({ channelName }: ChannelConfigPageProps) {
               arrayFieldResetVersion={arrayFieldResetVersion}
             />
           </>
+        )
+      case "whatsapp_native":
+        return (
+          <WhatsAppNativeForm
+            config={editConfig}
+            onChange={handleChange}
+            registerArrayFieldFlusher={registerArrayFieldFlusher}
+            arrayFieldResetVersion={arrayFieldResetVersion}
+          />
         )
       default:
         return (

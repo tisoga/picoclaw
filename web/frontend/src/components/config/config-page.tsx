@@ -25,7 +25,6 @@ import {
   LauncherSection,
   MCPSection,
   RuntimeSection,
-  WebhookSection,
 } from "@/components/config/config-sections"
 import {
   type CoreConfigForm,
@@ -846,8 +845,6 @@ export function ConfigPage() {
               <ExecSection form={form} onFieldChange={updateField} />
 
               <CronSection form={form} onFieldChange={updateField} />
-
-              <WebhookSection form={form} onFieldChange={updateField} />
 
               <DevicesSection
                 form={form}

@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as WebhookRouteImport } from './routes/webhook'
 import { Route as QuotaRouteImport } from './routes/quota'
 import { Route as ModelsRouteImport } from './routes/models'
 import { Route as LogsRouteImport } from './routes/logs'
@@ -25,6 +26,11 @@ import { Route as AgentToolsRouteImport } from './routes/agent/tools'
 import { Route as AgentSkillsRouteImport } from './routes/agent/skills'
 import { Route as AgentHubRouteImport } from './routes/agent/hub'
 
+const WebhookRoute = WebhookRouteImport.update({
+  id: '/webhook',
+  path: '/webhook',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const QuotaRoute = QuotaRouteImport.update({
   id: '/quota',
   path: '/quota',
@@ -112,6 +118,7 @@ export interface FileRoutesByFullPath {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/quota': typeof QuotaRoute
+  '/webhook': typeof WebhookRoute
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
@@ -129,6 +136,7 @@ export interface FileRoutesByTo {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/quota': typeof QuotaRoute
+  '/webhook': typeof WebhookRoute
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
@@ -147,6 +155,7 @@ export interface FileRoutesById {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/quota': typeof QuotaRoute
+  '/webhook': typeof WebhookRoute
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
@@ -166,6 +175,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/quota'
+    | '/webhook'
     | '/agent/hub'
     | '/agent/skills'
     | '/agent/tools'
@@ -183,6 +193,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/quota'
+    | '/webhook'
     | '/agent/hub'
     | '/agent/skills'
     | '/agent/tools'
@@ -200,6 +211,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/quota'
+    | '/webhook'
     | '/agent/hub'
     | '/agent/skills'
     | '/agent/tools'
@@ -218,10 +230,18 @@ export interface RootRouteChildren {
   LogsRoute: typeof LogsRoute
   ModelsRoute: typeof ModelsRoute
   QuotaRoute: typeof QuotaRoute
+  WebhookRoute: typeof WebhookRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/webhook': {
+      id: '/webhook'
+      path: '/webhook'
+      fullPath: '/webhook'
+      preLoaderRoute: typeof WebhookRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/quota': {
       id: '/quota'
       path: '/quota'
@@ -378,6 +398,7 @@ const rootRouteChildren: RootRouteChildren = {
   LogsRoute: LogsRoute,
   ModelsRoute: ModelsRoute,
   QuotaRoute: QuotaRoute,
+  WebhookRoute: WebhookRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

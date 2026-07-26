@@ -251,6 +251,7 @@ export function ModelsPage() {
         onClose={() => setEditingModel(null)}
         onSaved={fetchModels}
         providerOptions={providerOptions}
+        existingModelNames={models.map((model) => model.model_name)}
       />
 
       <AddModelSheet

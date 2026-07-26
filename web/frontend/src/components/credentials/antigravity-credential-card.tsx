@@ -37,7 +37,7 @@ export function AntigravityCredentialCard({
           <span className="border-muted inline-flex size-6 items-center justify-center rounded-full border">
             <IconBrandGoogle className="size-3.5" />
           </span>
-          <span>Google Antigravity</span>
+          <span>Antigravity</span>
         </span>
       }
       description={t("credentials.providers.antigravity.description")}

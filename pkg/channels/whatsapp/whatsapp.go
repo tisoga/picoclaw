@@ -152,7 +152,8 @@ func (c *WhatsAppChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]
 
 	requestID := "pico-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	payload := map[string]any{
-		"type": "message", "id": requestID, "to": msg.ChatID, "content": msg.Content,
+		"type": "message", "id": requestID, "to": msg.ChatID,
+		"content": whatsappcommon.FormatMarkdown(msg.Content),
 	}
 	if msg.ReplyToMessageID != "" {
 		payload["reply_to"] = msg.ReplyToMessageID
@@ -375,7 +376,7 @@ func (c *WhatsAppChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMe
 		} else if maxBytes > 0 && info.Size() > maxBytes {
 			return nil, fmt.Errorf("whatsapp media exceeds configured limit")
 		}
-		parts = append(parts, map[string]any{"type": part.Type, "path": path, "caption": part.Caption, "filename": part.Filename, "content_type": part.ContentType})
+		parts = append(parts, map[string]any{"type": part.Type, "path": path, "caption": whatsappcommon.FormatMarkdown(part.Caption), "filename": part.Filename, "content_type": part.ContentType})
 	}
 	requestID := "pico-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	if err := c.writePayload(ctx, map[string]any{"type": "media", "id": requestID, "to": msg.ChatID, "media": parts}); err != nil {

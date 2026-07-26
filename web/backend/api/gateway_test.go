@@ -341,6 +341,29 @@ func TestStartGatewayLocked_UsesReloadedConfigForBootSignature(t *testing.T) {
 	}
 }
 
+func TestComputeConfigSignatureIncludesWebhookChanges(t *testing.T) {
+	cfg := config.DefaultConfig()
+	original := computeConfigSignature(cfg)
+
+	cfg.Gateway.Webhook.Enabled = true
+	cfg.Gateway.Webhook.Token = *config.NewSecureString("first-token")
+	enabled := computeConfigSignature(cfg)
+	if enabled == original {
+		t.Fatal("webhook enable/token change did not change config signature")
+	}
+
+	cfg.Gateway.Webhook.Token = *config.NewSecureString("second-token")
+	if changed := computeConfigSignature(cfg); changed == enabled {
+		t.Fatal("webhook token change did not change config signature")
+	}
+
+	beforeAllowAll := computeConfigSignature(cfg)
+	cfg.Gateway.Webhook.AllowAllIPs = true
+	if changed := computeConfigSignature(cfg); changed == beforeAllowAll {
+		t.Fatal("webhook allow_all_ips change did not change config signature")
+	}
+}
+
 func TestGatewayStartReady_NoDefaultModel(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	h := NewHandler(configPath)

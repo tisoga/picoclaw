@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"strings"
 
@@ -27,6 +28,9 @@ type GatewayWebhookConfig struct {
 	Token           SecureString `json:"token,omitzero"             yaml:"token,omitempty"`
 	Path            string       `json:"path,omitempty"             yaml:"-"`
 	AllowedChannels []string     `json:"allowed_channels,omitempty" yaml:"-"`
+	AllowedIPs      []string     `json:"allowed_ips,omitempty"      yaml:"-"`
+	AllowAllIPs     bool         `json:"allow_all_ips,omitempty"    yaml:"-"`
+	MediaMaxMB      int          `json:"media_max_mb,omitempty"     yaml:"-"`
 }
 
 // EffectiveWebhookPath returns the configured webhook path or the default.
@@ -37,6 +41,15 @@ func (c GatewayWebhookConfig) EffectiveWebhookPath() string {
 	return "/webhook/send"
 }
 
+// EffectiveMediaMaxBytes returns the webhook attachment limit. Zero uses 10 MiB.
+func (c GatewayWebhookConfig) EffectiveMediaMaxBytes() int64 {
+	maxMB := c.MediaMaxMB
+	if maxMB <= 0 {
+		maxMB = 10
+	}
+	return int64(maxMB) * 1024 * 1024
+}
+
 // IsChannelAllowed returns true if the channel is in the allowed list.
 // An empty AllowedChannels list means all channels are allowed.
 func (c GatewayWebhookConfig) IsChannelAllowed(channel string) bool {
@@ -45,6 +58,43 @@ func (c GatewayWebhookConfig) IsChannelAllowed(channel string) bool {
 	}
 	for _, allowed := range c.AllowedChannels {
 		if strings.EqualFold(allowed, channel) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsIPAllowed reports whether remoteAddr is authorized by the webhook IP
+// policy. Entries may be individual IPv4/IPv6 addresses or CIDR ranges.
+// Only the socket peer address is used; proxy headers are intentionally not
+// trusted for authentication.
+func (c GatewayWebhookConfig) IsIPAllowed(remoteAddr string) bool {
+	if c.AllowAllIPs {
+		return true
+	}
+
+	host := strings.TrimSpace(remoteAddr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	remoteIP := net.ParseIP(host)
+	if remoteIP == nil {
+		return false
+	}
+
+	for _, entry := range c.AllowedIPs {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if allowedIP := net.ParseIP(strings.Trim(entry, "[]")); allowedIP != nil {
+			if allowedIP.Equal(remoteIP) {
+				return true
+			}
+			continue
+		}
+		if _, network, err := net.ParseCIDR(entry); err == nil && network.Contains(remoteIP) {
 			return true
 		}
 	}

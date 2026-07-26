@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
@@ -1033,10 +1034,7 @@ func (m *Manager) getChannelConfigAndEnabled(channelName string) (*config.Channe
 
 	// Use Type to determine the config struct for validation.
 	// The map key (channelName) is the config key, which may differ from the type.
-	channelType := bc.Type
-	if channelType == "" {
-		channelType = channelName
-	}
+	channelType := effectiveChannelType(channelName, bc)
 
 	// Settings have already been decoded by InitChannelList, so we just need to
 	// type-assert and check the relevant fields.
@@ -1050,7 +1048,7 @@ func (m *Manager) getChannelConfigAndEnabled(channelName string) (*config.Channe
 		if channelType == config.ChannelWhatsApp {
 			return bc, settings.BridgeURL != ""
 		}
-		return bc, channelType == config.ChannelWhatsAppNative && settings.UseNative
+		return bc, channelType == config.ChannelWhatsAppNative
 	case *config.MatrixSettings:
 		return bc, settings.Homeserver != "" && settings.UserID != "" && settings.AccessToken.String() != ""
 	case *config.WeComSettings:
@@ -1094,6 +1092,32 @@ func (m *Manager) getChannelConfigAndEnabled(channelName string) (*config.Channe
 	return bc, bc.Enabled
 }
 
+// effectiveChannelType resolves transport variants that share one configuration
+// key. WhatsApp keeps the runtime channel name "whatsapp", while use_native
+// selects the native whatsmeow factory instead of the external bridge factory.
+func effectiveChannelType(channelName string, bc *config.Channel) string {
+	if bc == nil {
+		return channelName
+	}
+	channelType := bc.Type
+	if channelType == "" {
+		channelType = channelName
+	}
+	if channelType != config.ChannelWhatsApp &&
+		channelType != config.ChannelWhatsAppNative {
+		return channelType
+	}
+	decoded, err := bc.GetDecoded()
+	if err != nil {
+		return channelType
+	}
+	settings, ok := decoded.(*config.WhatsAppSettings)
+	if ok && settings.UseNative {
+		return config.ChannelWhatsAppNative
+	}
+	return config.ChannelWhatsApp
+}
+
 // initChannels initializes all enabled channels based on the configuration.
 // It iterates config entries and uses bc.Type to look up the appropriate factory.
 func (m *Manager) initChannels(channels *config.ChannelsConfig) error {
@@ -1107,10 +1131,7 @@ func (m *Manager) initChannels(channels *config.ChannelsConfig) error {
 		if !ready {
 			continue
 		}
-		typeName := bc.Type
-		if typeName == "" {
-			typeName = name
-		}
+		typeName := effectiveChannelType(name, bc)
 		m.initChannel(typeName, name)
 	}
 
@@ -2104,6 +2125,40 @@ func (m *Manager) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) e
 
 	_, err := m.sendMediaWithRetry(ctx, channelName, w, msg)
 	return err
+}
+
+// SendLocalMediaToChannel registers a temporary attachment, sends it through the
+// channel media pipeline, and releases it after the synchronous send returns.
+func (m *Manager) SendLocalMediaToChannel(
+	ctx context.Context, channelName, chatID, caption, mediaType, path,
+	filename, contentType string,
+) error {
+	if m.mediaStore == nil {
+		return fmt.Errorf("media store unavailable")
+	}
+	scope := "webhook:" + uuid.NewString()
+	ref, err := m.mediaStore.Store(path, media.MediaMeta{
+		Filename:      filename,
+		ContentType:   contentType,
+		Source:        "webhook",
+		CleanupPolicy: media.CleanupPolicyDeleteOnCleanup,
+	}, scope)
+	if err != nil {
+		return err
+	}
+	defer m.mediaStore.ReleaseAll(scope)
+
+	return m.SendMedia(ctx, bus.OutboundMediaMessage{
+		Channel: channelName,
+		ChatID:  chatID,
+		Parts: []bus.MediaPart{{
+			Type:        mediaType,
+			Ref:         ref,
+			Caption:     caption,
+			Filename:    filename,
+			ContentType: contentType,
+		}},
+	})
 }
 
 func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, content string) error {

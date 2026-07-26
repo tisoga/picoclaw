@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/sipeed/picoclaw/pkg/auth"
@@ -23,12 +24,13 @@ import (
 )
 
 const (
-	antigravityBaseURL      = "https://cloudcode-pa.googleapis.com"
+	antigravityBaseURL      = "https://daily-cloudcode-pa.googleapis.com"
 	antigravityDefaultModel = "gemini-3-flash"
 	antigravityUserAgent    = "antigravity"
 	antigravityXGoogClient  = "google-cloud-sdk vscode_cloudshelleditor/0.1"
-	antigravityVersion      = "1.15.8"
 	antigravityIDEVersion   = "2.1.1"
+	antigravityMaxBodySize  = 64 << 20
+	antigravityMaxTokens    = 64000
 )
 
 // AntigravityProvider implements LLMProvider using Google's Cloud Code Assist (Antigravity) API.
@@ -47,7 +49,7 @@ func NewAntigravityProvider() *AntigravityProvider {
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 		},
-		baseURL: "https://daily-cloudcode-pa.googleapis.com",
+		baseURL: antigravityBaseURL,
 	}
 }
 
@@ -72,7 +74,10 @@ func (p *AntigravityProvider) GenerateImage(
 	if prompt == "" {
 		return nil, fmt.Errorf("antigravity image generation requires a prompt")
 	}
-	model = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(model), "google-antigravity/"), "antigravity/")
+	model = strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(
+		strings.TrimSpace(model),
+		"google-antigravity/",
+	), "antigravity/"), "ag/")
 	if !strings.Contains(strings.ToLower(model), "image") {
 		model = "gemini-3.1-flash-image"
 	}
@@ -104,7 +109,7 @@ func (p *AntigravityProvider) GenerateImage(
 	}
 	baseURL := strings.TrimRight(p.baseURL, "/")
 	if baseURL == "" {
-		baseURL = "https://daily-cloudcode-pa.googleapis.com"
+		baseURL = antigravityBaseURL
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1internal:generateContent", bytes.NewReader(body))
 	if err != nil {
@@ -112,9 +117,7 @@ func (p *AntigravityProvider) GenerateImage(
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "google-api-nodejs-client/9.15.1")
-	req.Header.Set("X-Goog-Api-Client", antigravityXGoogClient)
-	req.Header.Set("X-Machine-Session-Id", sessionID)
+	req.Header.Set("User-Agent", antigravityIDEUserAgent())
 	client := p.httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 180 * time.Second}
@@ -124,7 +127,7 @@ func (p *AntigravityProvider) GenerateImage(
 		return nil, fmt.Errorf("antigravity image API call: %w", err)
 	}
 	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, antigravityMaxBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("read antigravity image response: %w", err)
 	}
@@ -224,18 +227,29 @@ func (p *AntigravityProvider) Chat(
 	// Strip provider prefixes if present
 	model = strings.TrimPrefix(model, "google-antigravity/")
 	model = strings.TrimPrefix(model, "antigravity/")
+	model = strings.TrimPrefix(model, "ag/")
+	model, thinkingLevel := resolveAntigravityModel(model, options)
 
-	logger.DebugCF("provider.antigravity", "Starting chat", map[string]any{
-		"model":     model,
-		"project":   projectID,
-		"requestId": fmt.Sprintf("agent-%d-%s", time.Now().UnixMilli(), randomString(9)),
-	})
-
-	// Wrap in v1internal envelope (matches pi-ai SDK format)
-	sessionID := fmt.Sprintf("session-%d-%s", time.Now().UnixMilli(), randomString(9))
+	// Match the current Antigravity IDE envelope used by 9router.
+	sessionID := uuid.NewString() + strconv.FormatInt(time.Now().UnixMilli(), 10)
 
 	// Build the inner Gemini-format request
 	innerRequest := p.buildRequest(messages, tools, model, options, sessionID)
+	if thinkingLevel != "" {
+		if innerRequest.Config == nil {
+			innerRequest.Config = &antigravityGenConfig{}
+		}
+		innerRequest.Config.Thinking = &antigravityThinkingConfig{
+			ThinkingLevel:   thinkingLevel,
+			IncludeThoughts: true,
+		}
+	}
+	requestID := antigravityRequestID(sessionID, model, "agent", len(innerRequest.Contents))
+	logger.DebugCF("provider.antigravity", "Starting chat", map[string]any{
+		"model":     model,
+		"project":   projectID,
+		"requestId": requestID,
+	})
 
 	envelope := map[string]any{
 		"project":     projectID,
@@ -243,7 +257,7 @@ func (p *AntigravityProvider) Chat(
 		"request":     innerRequest,
 		"requestType": "agent",
 		"userAgent":   antigravityUserAgent,
-		"requestId":   fmt.Sprintf("agent-%d-%s", time.Now().UnixMilli(), randomString(9)),
+		"requestId":   requestID,
 	}
 
 	bodyBytes, err := json.Marshal(envelope)
@@ -251,36 +265,32 @@ func (p *AntigravityProvider) Chat(
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	// Build API URL — uses Cloud Code Assist v1internal streaming endpoint
-	// 9router: use daily-cloudcode-pa for generation to avoid 429 rate limits
-	apiURL := "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+	baseURL := strings.TrimRight(p.baseURL, "/")
+	if baseURL == "" {
+		baseURL = antigravityBaseURL
+	}
+	apiURL := baseURL + "/v1internal:streamGenerateContent?alt=sse"
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	// Headers matching the pi-ai SDK antigravity format
-	clientMetadata, _ := json.Marshal(map[string]any{
-		"ideType":    9, // GENERIC_IDE
-		"platform":   2, // LINUX
-		"pluginType": 2, // GEMINI_CLOUD_CODE
-	})
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("User-Agent", "google-api-nodejs-client/9.15.1")
-	req.Header.Set("X-Goog-Api-Client", antigravityXGoogClient)
-	req.Header.Set("Client-Metadata", string(clientMetadata))
-	req.Header.Set("X-Machine-Session-Id", sessionID)
+	req.Header.Set("User-Agent", antigravityIDEUserAgent())
 
-	resp, err := p.httpClient.Do(req)
+	client := p.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 120 * time.Second}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("antigravity API call: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, antigravityMaxBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -342,11 +352,13 @@ type antigravityPart struct {
 }
 
 type antigravityFunctionCall struct {
+	ID   string         `json:"id"`
 	Name string         `json:"name"`
 	Args map[string]any `json:"args"`
 }
 
 type antigravityFunctionResponse struct {
+	ID       string         `json:"id"`
 	Name     string         `json:"name"`
 	Response map[string]any `json:"response"`
 }
@@ -366,8 +378,14 @@ type antigravitySystemPrompt struct {
 }
 
 type antigravityGenConfig struct {
-	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
-	Temperature     float64 `json:"temperature,omitempty"`
+	MaxOutputTokens int                        `json:"maxOutputTokens,omitempty"`
+	Temperature     float64                    `json:"temperature,omitempty"`
+	Thinking        *antigravityThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+type antigravityThinkingConfig struct {
+	ThinkingLevel   string `json:"thinkingLevel"`
+	IncludeThoughts bool   `json:"includeThoughts"`
 }
 
 type antigravityToolConfig struct {
@@ -387,9 +405,10 @@ func (p *AntigravityProvider) buildRequest(
 		SessionID: sessionID,
 	}
 	toolCallNames := make(map[string]string)
+	toolCallIDs := make(map[string]string)
 
 	// Build contents from messages
-	for _, msg := range messages {
+	for messageIndex, msg := range messages {
 		switch msg.Role {
 		case "system":
 			req.SystemPrompt = &antigravitySystemPrompt{
@@ -398,30 +417,22 @@ func (p *AntigravityProvider) buildRequest(
 		case "user":
 			if msg.ToolCallID != "" {
 				toolName := common.ResolveToolResponseName(msg.ToolCallID, toolCallNames)
-
-				// Apply same cloak logic to responses
-				isNative := false
-				for _, nativeName := range []string{
-					"browser_subagent", "command_status", "find_by_name", "generate_image",
-					"grep_search", "list_dir", "list_resources", "multi_replace_file_content",
-					"notify_user", "read_resource", "read_terminal", "read_url_content",
-					"replace_file_content", "run_command", "search_web", "send_command_input",
-					"task_boundary", "view_content_chunk", "view_file", "write_to_file",
-				} {
-					if toolName == nativeName {
-						isNative = true
-						break
-					}
-				}
-
-				if !isNative && !strings.HasSuffix(toolName, "_ide") {
-					toolName += "_ide"
+				toolName = sanitizeAntigravityFunctionName(toolName)
+				toolCallID := normalizedAntigravityToolCallID(
+					msg.ToolCallID,
+					messageIndex,
+					0,
+					toolName,
+				)
+				if mappedID := toolCallIDs[msg.ToolCallID]; mappedID != "" {
+					toolCallID = mappedID
 				}
 				// Tool result
 				req.Contents = append(req.Contents, antigravityContent{
 					Role: "user",
 					Parts: []antigravityPart{{
 						FunctionResponse: &antigravityFunctionResponse{
+							ID:   toolCallID,
 							Name: toolName,
 							Response: map[string]any{
 								"result": msg.Content,
@@ -442,7 +453,7 @@ func (p *AntigravityProvider) buildRequest(
 			if msg.Content != "" {
 				content.Parts = append(content.Parts, antigravityPart{Text: msg.Content})
 			}
-			for _, tc := range msg.ToolCalls {
+			for toolCallIndex, tc := range msg.ToolCalls {
 				toolName, toolArgs, thoughtSignature := common.NormalizeStoredToolCall(tc)
 				if toolName == "" {
 					logger.WarnCF(
@@ -455,37 +466,29 @@ func (p *AntigravityProvider) buildRequest(
 					continue
 				}
 
-				// 9router: Gemini 3 crashes if a tool call has no thoughtSignature. Backfill.
-				if thoughtSignature == "" {
+				// Gemini 3 requires an authentic signature on historical tool calls.
+				// Also migrate PicoClaw's old base64("Thinking...") placeholder.
+				if thoughtSignature == "" || thoughtSignature == antigravityLegacyThoughtSignature {
 					thoughtSignature = antigravityDefaultThoughtSignature
 				}
 
-				// 9router: Append _ide to tool names to match decoy pattern
-				isNative := false
-				for _, nativeName := range []string{
-					"browser_subagent", "command_status", "find_by_name", "generate_image",
-					"grep_search", "list_dir", "list_resources", "multi_replace_file_content",
-					"notify_user", "read_resource", "read_terminal", "read_url_content",
-					"replace_file_content", "run_command", "search_web", "send_command_input",
-					"task_boundary", "view_content_chunk", "view_file", "write_to_file",
-				} {
-					if toolName == nativeName {
-						isNative = true
-						break
-					}
-				}
-
-				if !isNative {
-					toolName = toolName + "_ide"
-				}
+				toolName = sanitizeAntigravityFunctionName(toolName)
+				toolCallID := normalizedAntigravityToolCallID(
+					tc.ID,
+					messageIndex,
+					toolCallIndex,
+					toolName,
+				)
 
 				if tc.ID != "" {
 					toolCallNames[tc.ID] = toolName
+					toolCallIDs[tc.ID] = toolCallID
 				}
 				content.Parts = append(content.Parts, antigravityPart{
 					ThoughtSignature:      thoughtSignature,
 					ThoughtSignatureSnake: thoughtSignature,
 					FunctionCall: &antigravityFunctionCall{
+						ID:   toolCallID,
 						Name: toolName,
 						Args: toolArgs,
 					},
@@ -496,13 +499,21 @@ func (p *AntigravityProvider) buildRequest(
 			}
 		case "tool":
 			toolName := common.ResolveToolResponseName(msg.ToolCallID, toolCallNames)
-			if !strings.HasSuffix(toolName, "_ide") {
-				toolName += "_ide"
+			toolName = sanitizeAntigravityFunctionName(toolName)
+			toolCallID := normalizedAntigravityToolCallID(
+				msg.ToolCallID,
+				messageIndex,
+				0,
+				toolName,
+			)
+			if mappedID := toolCallIDs[msg.ToolCallID]; mappedID != "" {
+				toolCallID = mappedID
 			}
 			req.Contents = append(req.Contents, antigravityContent{
 				Role: "user",
 				Parts: []antigravityPart{{
 					FunctionResponse: &antigravityFunctionResponse{
+						ID:   toolCallID,
 						Name: toolName,
 						Response: map[string]any{
 							"result": msg.Content,
@@ -516,58 +527,18 @@ func (p *AntigravityProvider) buildRequest(
 	// Build tools
 	if len(tools) > 0 {
 		var funcDecls []antigravityFuncDecl
-		existingTools := make(map[string]bool)
 		for _, t := range tools {
 			if t.Type != "function" {
 				continue
 			}
 
-			// Don't append _ide to AG defaults so they don't clash with the decoys
-			toolName := t.Function.Name
-
-			// If not a native tool, cloak it
-			isNative := false
-			for _, nativeName := range []string{
-				"browser_subagent", "command_status", "find_by_name", "generate_image",
-				"grep_search", "list_dir", "list_resources", "multi_replace_file_content",
-				"notify_user", "read_resource", "read_terminal", "read_url_content",
-				"replace_file_content", "run_command", "search_web", "send_command_input",
-				"task_boundary", "view_content_chunk", "view_file", "write_to_file",
-			} {
-				if toolName == nativeName {
-					isNative = true
-					break
-				}
-			}
-
-			if !isNative {
-				toolName += "_ide"
-			}
-
-			existingTools[toolName] = true
+			// Current 9router sanitizes names but leaves Antigravity cloaking disabled.
+			toolName := sanitizeAntigravityFunctionName(t.Function.Name)
 			funcDecls = append(funcDecls, antigravityFuncDecl{
 				Name:        toolName,
 				Description: t.Function.Description,
-				Parameters:  t.Function.Parameters,
+				Parameters:  common.SanitizeSchemaForGoogle(t.Function.Parameters),
 			})
-		}
-
-		// 9router: Inject 21 decoy tools to look like a native IDE
-		decoyNames := []string{
-			"browser_subagent", "command_status", "find_by_name", "generate_image",
-			"grep_search", "list_dir", "list_resources", "multi_replace_file_content",
-			"notify_user", "read_resource", "read_terminal", "read_url_content",
-			"replace_file_content", "run_command", "search_web", "send_command_input",
-			"task_boundary", "view_content_chunk", "view_file", "write_to_file",
-		}
-		for _, name := range decoyNames {
-			if !existingTools[name] {
-				funcDecls = append(funcDecls, antigravityFuncDecl{
-					Name:        name,
-					Description: "This tool is currently unavailable.",
-					Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
-				})
-			}
 		}
 
 		if len(funcDecls) > 0 {
@@ -581,9 +552,9 @@ func (p *AntigravityProvider) buildRequest(
 	config := &antigravityGenConfig{}
 	if val, ok := options["max_tokens"]; ok {
 		if maxTokens, ok := val.(int); ok && maxTokens > 0 {
-			config.MaxOutputTokens = maxTokens
+			config.MaxOutputTokens = min(maxTokens, antigravityMaxTokens)
 		} else if maxTokens, ok := val.(float64); ok && maxTokens > 0 {
-			config.MaxOutputTokens = int(maxTokens)
+			config.MaxOutputTokens = min(int(maxTokens), antigravityMaxTokens)
 		}
 	}
 	if temp, ok := options["temperature"].(float64); ok {
@@ -594,6 +565,32 @@ func (p *AntigravityProvider) buildRequest(
 	}
 
 	return req
+}
+
+func resolveAntigravityModel(model string, options map[string]any) (string, string) {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "gemini-3.6-flash-high":
+		return "gemini-3.6-flash-tiered", "high"
+	case "gemini-3.6-flash-medium":
+		return "gemini-3.6-flash-tiered", "medium"
+	case "gemini-3.6-flash-low":
+		return "gemini-3.6-flash-tiered", "low"
+	}
+
+	if !strings.Contains(strings.ToLower(model), "gemini-3.6") {
+		return model, ""
+	}
+	level, _ := options["thinking_level"].(string)
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "low":
+		return model, "low"
+	case "medium":
+		return model, "medium"
+	case "high", "xhigh", "adaptive":
+		return model, "high"
+	default:
+		return model, ""
+	}
 }
 
 // --- Response parsing ---
@@ -627,6 +624,7 @@ func (p *AntigravityProvider) parseSSEResponse(body string) (*LLMResponse, error
 	var finishReason string
 
 	scanner := bufio.NewScanner(strings.NewReader(body))
+	scanner.Buffer(make([]byte, 64<<10), antigravityMaxBodySize)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -656,10 +654,16 @@ func (p *AntigravityProvider) parseSSEResponse(body string) (*LLMResponse, error
 					}
 				}
 				if part.FunctionCall != nil {
-					name := strings.TrimSuffix(part.FunctionCall.Name, "_ide")
+					name := part.FunctionCall.Name
+					toolCallID := normalizedAntigravityToolCallID(
+						part.FunctionCall.ID,
+						0,
+						len(toolCalls),
+						name,
+					)
 					argumentsJSON, _ := json.Marshal(part.FunctionCall.Args)
 					toolCalls = append(toolCalls, ToolCall{
-						ID:        fmt.Sprintf("call_%s_%d", name, time.Now().UnixNano()),
+						ID:        toolCallID,
 						Name:      name,
 						Arguments: part.FunctionCall.Args,
 						Function: &FunctionCall{
@@ -685,6 +689,9 @@ func (p *AntigravityProvider) parseSSEResponse(body string) (*LLMResponse, error
 				TotalTokens:      resp.UsageMetadata.TotalTokenCount,
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading antigravity SSE response: %w", err)
 	}
 
 	mappedFinish := "stop"
@@ -712,6 +719,86 @@ func extractPartThoughtSignature(thoughtSignature string, thoughtSignatureSnake 
 		return thoughtSignatureSnake
 	}
 	return ""
+}
+
+func antigravityRequestID(sessionID, model, requestType string, contentCount int) string {
+	conversationID := uuid.NewSHA1(uuid.NameSpaceURL, []byte("antigravity:conversation:"+sessionID))
+	trajectoryID := uuid.NewSHA1(
+		uuid.NameSpaceURL,
+		[]byte("antigravity:trajectory:"+sessionID+":"+model+":"+requestType),
+	)
+	step := max(1, contentCount*2-1)
+	return fmt.Sprintf(
+		"agent/%s/%d/%s/%d",
+		conversationID.String(),
+		time.Now().UnixMilli(),
+		trajectoryID.String(),
+		step,
+	)
+}
+
+func sanitizeAntigravityFunctionName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "_unknown"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		valid := unicode.IsLetter(r) || unicode.IsDigit(r) ||
+			r == '_' || r == '.' || r == ':' || r == '-'
+		if valid && r <= unicode.MaxASCII {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+		if b.Len() >= 64 {
+			break
+		}
+	}
+	result := b.String()
+	if result == "" {
+		return "_unknown"
+	}
+	first := rune(result[0])
+	if !(unicode.IsLetter(first) || first == '_') {
+		result = "_" + result
+		if len(result) > 64 {
+			result = result[:64]
+		}
+	}
+	return result
+}
+
+// Anthropic models served through Antigravity require every tool_use and
+// matching tool_result to carry an ID matching ^[a-zA-Z0-9_-]+$. Gemini is
+// permissive here, so normalize IDs for both paths to keep channel history
+// portable when users switch models.
+func normalizedAntigravityToolCallID(
+	id string,
+	messageIndex int,
+	toolCallIndex int,
+	toolName string,
+) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(id) {
+		if r <= unicode.MaxASCII &&
+			(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-') {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() > 0 {
+		return b.String()
+	}
+
+	name := sanitizeAntigravityFunctionName(toolName)
+	b.Reset()
+	for _, r := range name {
+		if r <= unicode.MaxASCII &&
+			(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-') {
+			b.WriteRune(r)
+		}
+	}
+	return fmt.Sprintf("call_msg%d_tc%d_%s", messageIndex, toolCallIndex, b.String())
 }
 
 // --- Token source ---
@@ -756,7 +843,7 @@ func createAntigravityTokenSource() func() (string, string, error) {
 			// Fetch project ID and Onboard
 			fetchedID, err := FetchAntigravityProjectID(cred.AccessToken)
 			if err != nil {
-				return "", "", fmt.Errorf("failed to fetch project ID: %w. Your Google account may not be eligible for Gemini Code Assist", err)
+				return "", "", fmt.Errorf("failed to fetch project ID: %w. Your Google account may not be eligible for Antigravity", err)
 			}
 
 			// 9router: Explicitly onboard the user. If we don't do this, chat requests will fail
@@ -1099,7 +1186,8 @@ func antigravityClientMetadata() map[string]any {
 }
 
 func antigravityIDEUserAgent() string {
-	return fmt.Sprintf("antigravity/ide/%s %s/%s", antigravityIDEVersion, runtime.GOOS, runtime.GOARCH)
+	// Match the official Antigravity IDE fingerprint used by current 9router.
+	return fmt.Sprintf("antigravity/ide/%s darwin/arm64", antigravityIDEVersion)
 }
 
 type AntigravityModelInfo struct {

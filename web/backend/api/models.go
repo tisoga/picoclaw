@@ -131,6 +131,7 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 		return
 	}
 
+	mc.ModelName = strings.TrimSpace(mc.ModelName)
 	mc.Model = strings.TrimSpace(mc.Model)
 	mc.Provider = strings.TrimSpace(mc.Provider)
 	mc.AuthMethod = strings.ToLower(strings.TrimSpace(mc.AuthMethod))
@@ -468,11 +469,25 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
 		return
 	}
-	if cfg.Agents.Defaults.ModelName == cfg.ModelList[idx].ModelName &&
-		!defaultModelAllowedForModelConfig(&mc.ModelConfig) {
-		// Allow users to recover from legacy/invalid defaults by saving the model
-		// and clearing the default chat model reference in the same write.
-		cfg.Agents.Defaults.ModelName = ""
+	for modelIndex, model := range cfg.ModelList {
+		if modelIndex != idx && model.ModelName == mc.ModelName {
+			http.Error(
+				w,
+				fmt.Sprintf("Validation error: model name %q already exists", mc.ModelName),
+				http.StatusBadRequest,
+			)
+			return
+		}
+	}
+	if cfg.Agents.Defaults.ModelName == cfg.ModelList[idx].ModelName {
+		if defaultModelAllowedForModelConfig(&mc.ModelConfig) {
+			// Keep the same account selected when its user-facing name changes.
+			cfg.Agents.Defaults.ModelName = mc.ModelName
+		} else {
+			// Allow users to recover from legacy/invalid defaults by saving the
+			// model and clearing the default chat model reference.
+			cfg.Agents.Defaults.ModelName = ""
+		}
 	}
 
 	cfg.ModelList[idx] = &mc.ModelConfig

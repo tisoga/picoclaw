@@ -11,6 +11,7 @@ import {
   IconSettings,
   IconSparkles,
   IconTools,
+  IconWebhook,
 } from "@tabler/icons-react"
 import { Link, useRouterState } from "@tanstack/react-router"
 import * as React from "react"
@@ -166,6 +167,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             title: "navigation.config",
             url: "/config",
             icon: IconSettings,
+            translateTitle: true,
+          },
+          {
+            title: "navigation.webhook",
+            url: "/webhook",
+            icon: IconWebhook,
             translateTitle: true,
           },
           {

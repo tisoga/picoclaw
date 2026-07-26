@@ -18,7 +18,7 @@ type FlowWatchMode = "" | "status" | "poll"
 function getProviderLabel(provider: OAuthProvider | ""): string {
   if (provider === "openai") return "OpenAI"
   if (provider === "anthropic") return "Anthropic"
-  if (provider === "google-antigravity") return "Google Antigravity"
+  if (provider === "google-antigravity") return "Antigravity"
   return ""
 }
 

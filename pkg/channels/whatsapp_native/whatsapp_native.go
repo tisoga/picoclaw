@@ -561,12 +561,13 @@ func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessag
 		return nil, fmt.Errorf("invalid chat id %q: %w", msg.ChatID, err)
 	}
 
-	waMsg := &waE2E.Message{Conversation: proto.String(msg.Content)}
+	formattedContent := whatsappcommon.FormatMarkdown(msg.Content)
+	waMsg := &waE2E.Message{Conversation: proto.String(formattedContent)}
 	if msg.Poll != nil {
 		waMsg = c.client.BuildPollCreation(msg.Poll.Question, msg.Poll.Options, 1)
 	}
 	if msg.ReplyToMessageID != "" {
-		waMsg.ExtendedTextMessage = &waE2E.ExtendedTextMessage{Text: proto.String(msg.Content), ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String(msg.ReplyToMessageID)}}
+		waMsg.ExtendedTextMessage = &waE2E.ExtendedTextMessage{Text: proto.String(formattedContent), ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String(msg.ReplyToMessageID)}}
 		waMsg.Conversation = nil
 	}
 
@@ -625,6 +626,7 @@ func (c *WhatsAppNativeChannel) SendMedia(ctx context.Context, msg bus.OutboundM
 	maxBytes := whatsappcommon.MediaMaxBytes(c.config)
 	ids := make([]string, 0, len(msg.Parts))
 	for _, part := range msg.Parts {
+		caption := whatsappcommon.FormatMarkdown(part.Caption)
 		path, err := store.Resolve(part.Ref)
 		if err != nil {
 			return nil, err
@@ -668,14 +670,14 @@ func (c *WhatsAppNativeChannel) SendMedia(ctx context.Context, msg bus.OutboundM
 		var waMsg *waE2E.Message
 		switch part.Type {
 		case "image":
-			waMsg = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{URL: &resp.URL, DirectPath: &resp.DirectPath, MediaKey: resp.MediaKey, FileSHA256: resp.FileSHA256, FileEncSHA256: resp.FileEncSHA256, FileLength: &resp.FileLength, Mimetype: proto.String(mimeType), Caption: proto.String(part.Caption)}}
+			waMsg = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{URL: &resp.URL, DirectPath: &resp.DirectPath, MediaKey: resp.MediaKey, FileSHA256: resp.FileSHA256, FileEncSHA256: resp.FileEncSHA256, FileLength: &resp.FileLength, Mimetype: proto.String(mimeType), Caption: proto.String(caption)}}
 		case "audio":
 			waMsg = &waE2E.Message{AudioMessage: &waE2E.AudioMessage{URL: &resp.URL, DirectPath: &resp.DirectPath, MediaKey: resp.MediaKey, FileSHA256: resp.FileSHA256, FileEncSHA256: resp.FileEncSHA256, FileLength: &resp.FileLength, Mimetype: proto.String(mimeType)}}
 		case "video":
-			waMsg = &waE2E.Message{VideoMessage: &waE2E.VideoMessage{URL: &resp.URL, DirectPath: &resp.DirectPath, MediaKey: resp.MediaKey, FileSHA256: resp.FileSHA256, FileEncSHA256: resp.FileEncSHA256, FileLength: &resp.FileLength, Mimetype: proto.String(mimeType), Caption: proto.String(part.Caption)}}
+			waMsg = &waE2E.Message{VideoMessage: &waE2E.VideoMessage{URL: &resp.URL, DirectPath: &resp.DirectPath, MediaKey: resp.MediaKey, FileSHA256: resp.FileSHA256, FileEncSHA256: resp.FileEncSHA256, FileLength: &resp.FileLength, Mimetype: proto.String(mimeType), Caption: proto.String(caption)}}
 		default:
 			name := part.Filename
-			waMsg = &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{URL: &resp.URL, DirectPath: &resp.DirectPath, MediaKey: resp.MediaKey, FileSHA256: resp.FileSHA256, FileEncSHA256: resp.FileEncSHA256, FileLength: &resp.FileLength, Mimetype: proto.String(mimeType), FileName: &name, Caption: proto.String(part.Caption)}}
+			waMsg = &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{URL: &resp.URL, DirectPath: &resp.DirectPath, MediaKey: resp.MediaKey, FileSHA256: resp.FileSHA256, FileEncSHA256: resp.FileEncSHA256, FileLength: &resp.FileLength, Mimetype: proto.String(mimeType), FileName: &name, Caption: proto.String(caption)}}
 		}
 		respMsg, err := c.client.SendMessage(ctx, to, waMsg)
 		if err != nil {

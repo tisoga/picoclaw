@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -493,7 +494,39 @@ func computeConfigSignature(cfg *config.Config) string {
 	if len(channelSignatures) > 0 {
 		parts = append(parts, "channels:"+strings.Join(channelSignatures, ","))
 	}
+	if webhookSignature := computeWebhookSignature(cfg.Gateway.Webhook); webhookSignature != "" {
+		parts = append(parts, "webhook:"+webhookSignature)
+	}
 	return strings.Join(parts, ";")
+}
+
+func computeWebhookSignature(webhook config.GatewayWebhookConfig) string {
+	tokenHash := ""
+	if token := webhook.Token.String(); token != "" {
+		tokenHash = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
+	}
+	payload := struct {
+		Enabled         bool     `json:"enabled"`
+		TokenHash       string   `json:"token_hash,omitempty"`
+		Path            string   `json:"path"`
+		AllowedChannels []string `json:"allowed_channels,omitempty"`
+		AllowedIPs      []string `json:"allowed_ips,omitempty"`
+		AllowAllIPs     bool     `json:"allow_all_ips"`
+		MediaMaxMB      int      `json:"media_max_mb"`
+	}{
+		Enabled:         webhook.Enabled,
+		TokenHash:       tokenHash,
+		Path:            webhook.EffectiveWebhookPath(),
+		AllowedChannels: webhook.AllowedChannels,
+		AllowedIPs:      webhook.AllowedIPs,
+		AllowAllIPs:     webhook.AllowAllIPs,
+		MediaMaxMB:      webhook.MediaMaxMB,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 func computeModelStreamingSignatures(cfg *config.Config) []string {

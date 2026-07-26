@@ -14,6 +14,7 @@
     "show_more_channels": "আরও",
     "show_less_channels": "কম",
     "config": "কনফিগ",
+    "webhook": "Webhook",
     "logs": "লগ"
   },
   "launcherLogin": {
@@ -177,7 +178,7 @@
         "description": "Claude অ্যাক্সেসের জন্য টোকেন লগইন ব্যবহার করে।"
       },
       "antigravity": {
-        "description": "Google Cloud Code Assist-এর জন্য ব্রাউজার OAuth ব্যবহার করে।"
+        "description": "Antigravity অ্যাকাউন্ট সংযুক্ত করতে ব্রাউজার OAuth ব্যবহার করে।"
       }
     },
     "status": {

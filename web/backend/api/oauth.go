@@ -55,7 +55,7 @@ var oauthProviderMethods = map[string][]string{
 var oauthProviderLabels = map[string]string{
 	oauthProviderOpenAI:            "OpenAI",
 	oauthProviderAnthropic:         "Anthropic",
-	oauthProviderGoogleAntigravity: "Google Antigravity",
+	oauthProviderGoogleAntigravity: "Antigravity",
 }
 
 var (
@@ -911,13 +911,13 @@ func (h *Handler) handleGetOAuthQuota(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if provider != oauthProviderGoogleAntigravity {
-		http.Error(w, "Quota tracking is currently only supported for Google Antigravity", http.StatusBadRequest)
+		http.Error(w, "Quota tracking is currently only supported for Antigravity", http.StatusBadRequest)
 		return
 	}
 
 	cred, err := oauthGetCredential(provider)
 	if err != nil || cred == nil {
-		http.Error(w, "Google Antigravity is not connected", http.StatusUnauthorized)
+		http.Error(w, "Antigravity is not connected", http.StatusUnauthorized)
 		return
 	}
 

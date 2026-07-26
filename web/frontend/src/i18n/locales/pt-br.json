@@ -14,6 +14,7 @@
     "show_more_channels": "Mais",
     "show_less_channels": "Menos",
     "config": "Configuração",
+    "webhook": "Webhook",
     "logs": "Logs"
   },
   "launcherLogin": {
@@ -178,7 +179,7 @@
         "description": "Usa login por token para acesso ao Claude."
       },
       "antigravity": {
-        "description": "Usa OAuth via navegador para o Google Cloud Code Assist."
+        "description": "Usa OAuth via navegador para conectar sua conta Antigravity."
       }
     },
     "status": {

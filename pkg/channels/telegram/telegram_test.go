@@ -1626,7 +1626,7 @@ func TestHandleMessage_MediaGroupCombinesCaptionMessages(t *testing.T) {
 }
 
 func TestHandleMessage_MediaGroupWaitsForStaggeredMessages(t *testing.T) {
-	messageBus, ch := newMediaGroupTestChannel(100 * time.Millisecond)
+	messageBus, ch := newMediaGroupTestChannel(500 * time.Millisecond)
 	base := testMediaGroupMessage("album-staggered")
 	first := base
 	first.MessageID = 1
@@ -1636,13 +1636,13 @@ func TestHandleMessage_MediaGroupWaitsForStaggeredMessages(t *testing.T) {
 	second.Caption = "second caption"
 
 	require.NoError(t, ch.handleMessage(context.Background(), &first))
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(25 * time.Millisecond)
 	require.NoError(t, ch.handleMessage(context.Background(), &second))
 
 	select {
 	case inbound := <-messageBus.InboundChan():
 		t.Fatalf("media group flushed before idle delay reset: %#v", inbound)
-	case <-time.After(75 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 	}
 
 	select {
