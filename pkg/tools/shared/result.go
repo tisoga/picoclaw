@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	HandledToolLLMNote   = "The requested output has already been delivered to the user in the current chat. Do not call send_file or any other delivery tool again. If you reply, provide only a brief confirmation."
-	ArtifactPathsLLMNote = "Use `send_file` with one of these paths to send it to the user, or use file/exec tools to save it inside the workspace if requested."
+	HandledToolLLMNote         = "The requested output has already been delivered to the user in the current chat. Do not call send_file or any other delivery tool again. If you reply, provide only a brief confirmation."
+	HandledToolContinueLLMNote = "The generated media has already been delivered to the user in the current chat. Do not call send_file or any other delivery tool again. Continue the user's remaining request now and provide the requested caption, description, facts, explanation, or other text."
+	ArtifactPathsLLMNote       = "Use `send_file` with one of these paths to send it to the user, or use file/exec tools to save it inside the workspace if requested."
 )
 
 // ToolResult represents the structured return value from tool execution.
@@ -59,6 +60,11 @@ type ToolResult struct {
 	// user's request at the channel/output level, so the agent loop can stop
 	// without a follow-up assistant response.
 	ResponseHandled bool `json:"response_handled,omitempty"`
+
+	// ContinueAfterResponse keeps the agent loop running after an already
+	// delivered tool result. This is used for compound requests such as an
+	// image plus a separate explanation, without changing other handled tools.
+	ContinueAfterResponse bool `json:"continue_after_response,omitempty"`
 }
 
 // ContentForLLM returns the normalized textual content to append to the
@@ -72,11 +78,15 @@ func (tr *ToolResult) ContentForLLM() string {
 		content = tr.Err.Error()
 	}
 	if tr.ResponseHandled {
-		if content == "" {
-			return HandledToolLLMNote
+		note := HandledToolLLMNote
+		if tr.ContinueAfterResponse {
+			note = HandledToolContinueLLMNote
 		}
-		if !strings.Contains(content, HandledToolLLMNote) {
-			content += "\n" + HandledToolLLMNote
+		if content == "" {
+			return note
+		}
+		if !strings.Contains(content, note) {
+			content += "\n" + note
 		}
 	}
 	if len(tr.ArtifactTags) > 0 {
@@ -219,5 +229,13 @@ func (tr *ToolResult) WithError(err error) *ToolResult {
 // WithResponseHandled marks the tool result as already delivered to the user.
 func (tr *ToolResult) WithResponseHandled() *ToolResult {
 	tr.ResponseHandled = true
+	return tr
+}
+
+// WithResponseContinuation keeps the turn running after handled output is
+// delivered so the assistant can complete a compound request.
+func (tr *ToolResult) WithResponseContinuation() *ToolResult {
+	tr.ResponseHandled = true
+	tr.ContinueAfterResponse = true
 	return tr
 }

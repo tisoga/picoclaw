@@ -58,22 +58,24 @@ type CronStore struct {
 type JobHandler func(job *CronJob) (string, error)
 
 type CronService struct {
-	storePath string
-	store     *CronStore
-	onJob     JobHandler
-	mu        sync.RWMutex
-	running   bool
-	stopChan  chan struct{}
-	wakeChan  chan struct{}
-	gronx     *gronx.Gronx
+	storePath   string
+	store       *CronStore
+	onJob       JobHandler
+	mu          sync.RWMutex
+	running     bool
+	stopChan    chan struct{}
+	wakeChan    chan struct{}
+	gronx       *gronx.Gronx
+	runningJobs map[string]bool
 }
 
 func NewCronService(storePath string, onJob JobHandler) *CronService {
 	cs := &CronService{
-		storePath: storePath,
-		onJob:     onJob,
-		gronx:     gronx.New(),
-		wakeChan:  make(chan struct{}),
+		storePath:   storePath,
+		onJob:       onJob,
+		gronx:       gronx.New(),
+		wakeChan:    make(chan struct{}),
+		runningJobs: make(map[string]bool),
 	}
 	// Initialize and load store on creation
 	cs.loadStore()
@@ -212,6 +214,21 @@ func (cs *CronService) checkJobs() {
 }
 
 func (cs *CronService) executeJobByID(jobID string) {
+	if !cs.reserveJob(jobID) {
+		// A manual run may overlap the scheduled instant. Keep one lightweight
+		// retry chain so the scheduled occurrence is delayed rather than lost.
+		if _, exists := cs.GetJob(jobID); exists {
+			time.AfterFunc(time.Second, func() {
+				cs.executeJobByID(jobID)
+			})
+		}
+		return
+	}
+	defer cs.releaseJob(jobID)
+	cs.executeReservedJobByID(jobID, false)
+}
+
+func (cs *CronService) executeReservedJobByID(jobID string, preserveSchedule bool) {
 	startTime := time.Now().UnixMilli()
 
 	cs.mu.RLock()
@@ -270,9 +287,16 @@ func (cs *CronService) executeJobByID(jobID string) {
 		job.State.LastError = ""
 	}
 
-	// Compute next run time
+	// Compute next run time. Manual test runs preserve the saved schedule,
+	// including one-time jobs and interval anchors.
 	var nextRunStr string
-	if job.Schedule.Kind == "at" {
+	if preserveSchedule {
+		if job.State.NextRunAtMS != nil {
+			nextRunStr = time.UnixMilli(*job.State.NextRunAtMS).Format("2006-01-02 15:04:05")
+		} else {
+			nextRunStr = "(unchanged)"
+		}
+	} else if job.Schedule.Kind == "at" {
 		if job.DeleteAfterRun {
 			cs.removeJobUnsafe(job.ID)
 			nextRunStr = "(deleted)"
@@ -298,6 +322,40 @@ func (cs *CronService) executeJobByID(jobID string) {
 	if err := cs.saveStoreUnsafe(); err != nil {
 		log.Printf("[cron] failed to save store: %v", err)
 	}
+}
+
+func (cs *CronService) reserveJob(jobID string) bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.runningJobs[jobID] {
+		return false
+	}
+	for i := range cs.store.Jobs {
+		if cs.store.Jobs[i].ID == jobID {
+			cs.runningJobs[jobID] = true
+			return true
+		}
+	}
+	return false
+}
+
+func (cs *CronService) releaseJob(jobID string) {
+	cs.mu.Lock()
+	delete(cs.runningJobs, jobID)
+	cs.mu.Unlock()
+}
+
+// RunJobNow starts a saved job immediately without changing its normal next
+// run time. It returns false when the job does not exist or is already running.
+func (cs *CronService) RunJobNow(jobID string) bool {
+	if !cs.reserveJob(jobID) {
+		return false
+	}
+	go func() {
+		defer cs.releaseJob(jobID)
+		cs.executeReservedJobByID(jobID, true)
+	}()
+	return true
 }
 
 func (cs *CronService) computeNextRun(schedule *CronSchedule, nowMS int64) *int64 {
@@ -410,6 +468,19 @@ func (cs *CronService) AddJob(
 	message string,
 	channel, to string,
 ) (*CronJob, error) {
+	return cs.AddJobEnabled(name, schedule, message, channel, to, true)
+}
+
+// AddJobEnabled atomically creates and persists a job with its initial enabled
+// state. This avoids briefly scheduling disabled jobs during management API
+// creation.
+func (cs *CronService) AddJobEnabled(
+	name string,
+	schedule CronSchedule,
+	message string,
+	channel, to string,
+	enabled bool,
+) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -421,7 +492,7 @@ func (cs *CronService) AddJob(
 	job := CronJob{
 		ID:       generateID(),
 		Name:     name,
-		Enabled:  true,
+		Enabled:  enabled,
 		Schedule: schedule,
 		Payload: CronPayload{
 			Kind:    "agent_turn",
@@ -429,12 +500,13 @@ func (cs *CronService) AddJob(
 			Channel: channel,
 			To:      to,
 		},
-		State: CronJobState{
-			NextRunAtMS: cs.computeNextRun(&schedule, now),
-		},
+		State:          CronJobState{},
 		CreatedAtMS:    now,
 		UpdatedAtMS:    now,
 		DeleteAfterRun: deleteAfterRun,
+	}
+	if enabled {
+		job.State.NextRunAtMS = cs.computeNextRun(&schedule, now)
 	}
 
 	cs.store.Jobs = append(cs.store.Jobs, job)
@@ -585,18 +657,13 @@ func (cs *CronService) ListJobs(includeDisabled bool) []CronJob {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 
-	if includeDisabled {
-		return cs.store.Jobs
-	}
-
-	var enabled []CronJob
+	jobs := make([]CronJob, 0, len(cs.store.Jobs))
 	for _, job := range cs.store.Jobs {
-		if job.Enabled {
-			enabled = append(enabled, job)
+		if includeDisabled || job.Enabled {
+			jobs = append(jobs, cloneCronJob(job))
 		}
 	}
-
-	return enabled
+	return jobs
 }
 
 func (cs *CronService) Status() map[string]any {

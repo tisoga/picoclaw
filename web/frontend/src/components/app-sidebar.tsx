@@ -1,6 +1,7 @@
 import { IconChevronRight } from "@tabler/icons-react"
 import {
   IconAtom,
+  IconCalendarClock,
   IconChartPie,
   IconChevronsDown,
   IconChevronsUp,
@@ -174,6 +175,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             url: "/webhook",
             icon: IconWebhook,
             translateTitle: true,
+          },
+          {
+            title: "Scheduled Jobs",
+            url: "/schedules",
+            icon: IconCalendarClock,
+            translateTitle: false,
           },
           {
             title: "navigation.logs",

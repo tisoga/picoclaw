@@ -654,10 +654,14 @@ toolLoop:
 						})
 					toolResult = tools.ErrorResult(fmt.Sprintf("failed to deliver attachment: %v", err)).WithError(err)
 				} else {
-					handledAttachments = append(
-						handledAttachments,
-						buildProviderAttachments(al.mediaStore, toolResult.Media)...,
-					)
+					deliveredAttachments := buildProviderAttachments(al.mediaStore, toolResult.Media)
+					handledAttachments = append(handledAttachments, deliveredAttachments...)
+					if toolResult.ContinueAfterResponse {
+						exec.handledAttachments = append(
+							exec.handledAttachments,
+							deliveredAttachments...,
+						)
+					}
 				}
 			} else if al.bus != nil {
 				al.bus.PublishOutboundMedia(ctx, outboundMedia)
@@ -669,7 +673,7 @@ toolLoop:
 			toolResult.ArtifactTags = buildArtifactTags(al.mediaStore, toolResult.Media)
 		}
 
-		if !toolResult.ResponseHandled {
+		if !toolResult.ResponseHandled || toolResult.ContinueAfterResponse {
 			exec.allResponsesHandled = false
 		}
 

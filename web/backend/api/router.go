@@ -81,6 +81,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	// Gateway process lifecycle
 	h.registerGatewayRoutes(mux)
+	h.registerScheduleRoutes(mux)
 
 	// Session history
 	h.registerSessionRoutes(mux)

@@ -1873,6 +1873,59 @@ func TestProcessMessage_MediaToolHandledSkipsFollowUpLLMAndFinalText(t *testing.
 	}
 }
 
+func TestProcessMessage_HandledMediaCanContinueForRequestedText(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &handledMediaProvider{
+		followUp: "The peacock mantis shrimp can detect polarized light.",
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	store := media.NewFileMediaStore()
+	al.SetMediaStore(store)
+	telegramChannel := &fakeMediaChannel{fakeChannel: fakeChannel{id: "rid-telegram"}}
+	al.SetChannelManager(newStartedTestChannelManager(t, msgBus, store, "telegram", telegramChannel))
+
+	imagePath := filepath.Join(tmpDir, "animal.png")
+	if err := os.WriteFile(imagePath, []byte("fake image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	al.RegisterTool(&handledMediaTool{
+		store:            store,
+		path:             imagePath,
+		continueResponse: true,
+	})
+
+	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
+		Channel:  "telegram",
+		ChatID:   "chat1",
+		SenderID: "user1",
+		Content:  "generate an animal image and provide facts",
+	}))
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if response != provider.followUp {
+		t.Fatalf("response = %q, want %q", response, provider.followUp)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("provider calls = %d, want 2", provider.calls)
+	}
+	if len(telegramChannel.sentMedia) != 1 {
+		t.Fatalf("sent media = %d, want 1", len(telegramChannel.sentMedia))
+	}
+}
+
 func TestProcessMessage_HandledToolProcessesQueuedSteeringBeforeReturning(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.Config{
@@ -2395,6 +2448,7 @@ func (m *countingMockProvider) GetDefaultModel() string {
 type handledMediaProvider struct {
 	calls      int
 	toolCounts []int
+	followUp   string
 }
 
 func (m *handledMediaProvider) Chat(
@@ -2417,7 +2471,7 @@ func (m *handledMediaProvider) Chat(
 			}},
 		}, nil
 	}
-	return &providers.LLMResponse{}, nil
+	return &providers.LLMResponse{Content: m.followUp}, nil
 }
 
 func (m *handledMediaProvider) GetDefaultModel() string {
@@ -2935,8 +2989,9 @@ func (m *mockCustomTool) Execute(ctx context.Context, args map[string]any) *tool
 }
 
 type handledMediaTool struct {
-	store media.MediaStore
-	path  string
+	store            media.MediaStore
+	path             string
+	continueResponse bool
 }
 
 func (m *handledMediaTool) Name() string { return "handled_media_tool" }
@@ -2960,7 +3015,11 @@ func (m *handledMediaTool) Execute(ctx context.Context, args map[string]any) *to
 	if err != nil {
 		return tools.ErrorResult(err.Error()).WithError(err)
 	}
-	return tools.MediaResult("Attachment delivered by tool.", []string{ref}).WithResponseHandled()
+	result := tools.MediaResult("Attachment delivered by tool.", []string{ref})
+	if m.continueResponse {
+		return result.WithResponseContinuation()
+	}
+	return result.WithResponseHandled()
 }
 
 type handledUserTool struct{}

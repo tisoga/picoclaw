@@ -353,7 +353,7 @@ func (c *WhatsAppNativeChannel) reconnectWithBackoff() {
 		}
 
 		logger.InfoCF("whatsapp", "WhatsApp reconnecting", map[string]any{"backoff": backoff.String()})
-		err := client.Connect()
+		err := ensureWhatsAppConnected(client)
 		if err == nil {
 			logger.InfoC("whatsapp", "WhatsApp reconnected")
 			return
@@ -374,6 +374,26 @@ func (c *WhatsAppNativeChannel) reconnectWithBackoff() {
 			}
 		}
 	}
+}
+
+type whatsappReconnectClient interface {
+	Connect() error
+	IsConnected() bool
+}
+
+// ensureWhatsAppConnected handles the race between whatsmeow's internal
+// websocket recovery and PicoClaw's reconnect loop. The socket may reconnect
+// immediately before Connect, or while Connect is returning an "already
+// connected" error. In both cases the connected state is authoritative.
+func ensureWhatsAppConnected(client whatsappReconnectClient) error {
+	if client.IsConnected() {
+		return nil
+	}
+	err := client.Connect()
+	if err != nil && client.IsConnected() {
+		return nil
+	}
+	return err
 }
 
 func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {

@@ -296,6 +296,24 @@ func TestToolResultContentForLLM_UsesHandledDeliveryNoteWhenEmpty(t *testing.T) 
 	}
 }
 
+func TestToolResultContentForLLM_UsesContinuationNote(t *testing.T) {
+	result := MediaResult(
+		"Generated image attached.",
+		[]string{"media://example"},
+	).WithResponseContinuation()
+
+	content := result.ContentForLLM()
+	if !result.ResponseHandled || !result.ContinueAfterResponse {
+		t.Fatalf("continuation flags not set: %#v", result)
+	}
+	if !strings.Contains(content, handledToolContinueLLMNote) {
+		t.Fatalf("expected continuation guidance in ContentForLLM, got %q", content)
+	}
+	if strings.Contains(content, "provide only a brief confirmation") {
+		t.Fatalf("continuation result contains terminal guidance: %q", content)
+	}
+}
+
 func TestToolResultContentForLLM_AppendsArtifactPaths(t *testing.T) {
 	result := &ToolResult{
 		ForLLM:       "Artifact created.",

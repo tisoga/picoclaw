@@ -499,6 +499,11 @@ func setupAndStartServices(
 	)
 
 	registerWebhookHandler(cfg.Gateway.Webhook, runningServices.ChannelManager)
+	registerScheduleAPI(
+		runningServices.CronService,
+		authToken,
+		runningServices.ChannelManager,
+	)
 
 	if err = runningServices.ChannelManager.StartAll(context.Background()); err != nil {
 		return nil, fmt.Errorf("error starting channels: %w", err)

@@ -121,7 +121,8 @@ type turnExecution struct {
 	currentTurnStart int
 
 	// Turn output
-	finalContent string
+	finalContent       string
+	handledAttachments []providers.Attachment
 
 	// Iteration tracking
 	iteration int

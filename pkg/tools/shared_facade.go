@@ -28,8 +28,9 @@ type (
 )
 
 const (
-	handledToolLLMNote   = toolshared.HandledToolLLMNote
-	artifactPathsLLMNote = toolshared.ArtifactPathsLLMNote
+	handledToolLLMNote         = toolshared.HandledToolLLMNote
+	handledToolContinueLLMNote = toolshared.HandledToolContinueLLMNote
+	artifactPathsLLMNote       = toolshared.ArtifactPathsLLMNote
 
 	ToolPromptLayerCapability = toolshared.ToolPromptLayerCapability
 	ToolPromptSlotTooling     = toolshared.ToolPromptSlotTooling

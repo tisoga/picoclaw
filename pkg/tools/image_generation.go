@@ -72,6 +72,10 @@ func (t *ImageGenerationTool) Parameters() map[string]any {
 		"prompt":  map[string]any{"type": "string", "description": "Detailed description of the image to create."},
 		"size":    map[string]any{"type": "string", "description": "Image size, for example 1024x1024, 1792x1024, or 1024x1792."},
 		"quality": map[string]any{"type": "string", "enum": []string{"standard", "hd"}},
+		"continue_after_generation": map[string]any{
+			"type":        "boolean",
+			"description": "Set true only when the user requests text in addition to the image, such as a caption, description, facts, explanation, or analysis. Leave false for image-only requests.",
+		},
 	}, "required": []string{"prompt"}}
 }
 
@@ -84,6 +88,7 @@ func (t *ImageGenerationTool) Execute(ctx context.Context, args map[string]any) 
 	if t.mediaStore == nil {
 		return toolshared.ErrorResult("image generation is unavailable because the media store is not initialized")
 	}
+	continueAfterGeneration, _ := args["continue_after_generation"].(bool)
 	if t.antigravity != nil {
 		size, _ := args["size"].(string)
 		images, err := t.antigravity.GenerateImage(ctx, prompt, t.model, aspectRatioFromSize(size))
@@ -93,7 +98,7 @@ func (t *ImageGenerationTool) Execute(ctx context.Context, args map[string]any) 
 		if len(images) == 0 {
 			return toolshared.ErrorResult("antigravity image generation returned no image")
 		}
-		return t.storeGeneratedImage(ctx, images[0].Data, images[0].MIMEType)
+		return t.storeGeneratedImage(ctx, images[0].Data, images[0].MIMEType, continueAfterGeneration)
 	}
 	if t.apiBase == "" {
 		return toolshared.ErrorResult("image generation is not configured: set api_base on the active model")
@@ -157,10 +162,15 @@ func (t *ImageGenerationTool) Execute(ctx context.Context, args map[string]any) 
 	if err != nil {
 		return toolshared.ErrorResult("failed to decode generated image: " + err.Error())
 	}
-	return t.storeGeneratedImage(ctx, imageBytes, "image/png")
+	return t.storeGeneratedImage(ctx, imageBytes, "image/png", continueAfterGeneration)
 }
 
-func (t *ImageGenerationTool) storeGeneratedImage(ctx context.Context, imageBytes []byte, mimeType string) *toolshared.ToolResult {
+func (t *ImageGenerationTool) storeGeneratedImage(
+	ctx context.Context,
+	imageBytes []byte,
+	mimeType string,
+	continueAfterGeneration bool,
+) *toolshared.ToolResult {
 	if len(imageBytes) == 0 {
 		return toolshared.ErrorResult("image generation returned an empty image")
 	}
@@ -189,7 +199,11 @@ func (t *ImageGenerationTool) storeGeneratedImage(ctx context.Context, imageByte
 		_ = os.Remove(path)
 		return toolshared.ErrorResult("failed to register generated image: " + err.Error())
 	}
-	return toolshared.MediaResult("Generated image attached.", []string{ref}).WithResponseHandled()
+	result := toolshared.MediaResult("Generated image attached.", []string{ref})
+	if continueAfterGeneration {
+		return result.WithResponseContinuation()
+	}
+	return result.WithResponseHandled()
 }
 
 func aspectRatioFromSize(size string) string {

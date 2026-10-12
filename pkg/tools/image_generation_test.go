@@ -78,6 +78,9 @@ func TestImageGenerationToolStoresGeneratedImage(t *testing.T) {
 	if result.IsError || len(result.Media) != 1 || !result.ResponseHandled {
 		t.Fatalf("result = %#v", result)
 	}
+	if result.ContinueAfterResponse {
+		t.Fatal("image-only generation should remain terminal")
+	}
 	path, meta, err := store.ResolveWithMeta(result.Media[0])
 	if err != nil {
 		t.Fatal(err)
@@ -89,6 +92,14 @@ func TestImageGenerationToolStoresGeneratedImage(t *testing.T) {
 	}
 	if string(data) != "fake-png" || meta.ContentType != "image/png" {
 		t.Errorf("stored image = %q, meta = %#v", data, meta)
+	}
+
+	continued := tool.Execute(context.Background(), map[string]any{
+		"prompt":                    "a red kite",
+		"continue_after_generation": true,
+	})
+	if continued.IsError || !continued.ResponseHandled || !continued.ContinueAfterResponse {
+		t.Fatalf("continued result = %#v", continued)
 	}
 }
 

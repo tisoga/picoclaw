@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as WebhookRouteImport } from './routes/webhook'
+import { Route as SchedulesRouteImport } from './routes/schedules'
 import { Route as QuotaRouteImport } from './routes/quota'
 import { Route as ModelsRouteImport } from './routes/models'
 import { Route as LogsRouteImport } from './routes/logs'
@@ -29,6 +30,11 @@ import { Route as AgentHubRouteImport } from './routes/agent/hub'
 const WebhookRoute = WebhookRouteImport.update({
   id: '/webhook',
   path: '/webhook',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SchedulesRoute = SchedulesRouteImport.update({
+  id: '/schedules',
+  path: '/schedules',
   getParentRoute: () => rootRouteImport,
 } as any)
 const QuotaRoute = QuotaRouteImport.update({
@@ -118,6 +124,7 @@ export interface FileRoutesByFullPath {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/quota': typeof QuotaRoute
+  '/schedules': typeof SchedulesRoute
   '/webhook': typeof WebhookRoute
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
@@ -136,6 +143,7 @@ export interface FileRoutesByTo {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/quota': typeof QuotaRoute
+  '/schedules': typeof SchedulesRoute
   '/webhook': typeof WebhookRoute
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
@@ -155,6 +163,7 @@ export interface FileRoutesById {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/quota': typeof QuotaRoute
+  '/schedules': typeof SchedulesRoute
   '/webhook': typeof WebhookRoute
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
@@ -175,6 +184,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/quota'
+    | '/schedules'
     | '/webhook'
     | '/agent/hub'
     | '/agent/skills'
@@ -193,6 +203,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/quota'
+    | '/schedules'
     | '/webhook'
     | '/agent/hub'
     | '/agent/skills'
@@ -211,6 +222,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/quota'
+    | '/schedules'
     | '/webhook'
     | '/agent/hub'
     | '/agent/skills'
@@ -230,6 +242,7 @@ export interface RootRouteChildren {
   LogsRoute: typeof LogsRoute
   ModelsRoute: typeof ModelsRoute
   QuotaRoute: typeof QuotaRoute
+  SchedulesRoute: typeof SchedulesRoute
   WebhookRoute: typeof WebhookRoute
 }
 
@@ -240,6 +253,13 @@ declare module '@tanstack/react-router' {
       path: '/webhook'
       fullPath: '/webhook'
       preLoaderRoute: typeof WebhookRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/schedules': {
+      id: '/schedules'
+      path: '/schedules'
+      fullPath: '/schedules'
+      preLoaderRoute: typeof SchedulesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/quota': {
@@ -398,6 +418,7 @@ const rootRouteChildren: RootRouteChildren = {
   LogsRoute: LogsRoute,
   ModelsRoute: ModelsRoute,
   QuotaRoute: QuotaRoute,
+  SchedulesRoute: SchedulesRoute,
   WebhookRoute: WebhookRoute,
 }
 export const routeTree = rootRouteImport

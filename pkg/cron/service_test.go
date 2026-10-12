@@ -82,6 +82,55 @@ func TestCronService_CRUD(t *testing.T) {
 	}
 }
 
+func TestCronService_RunJobNowPreservesScheduleAndPreventsOverlap(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	cs, path := setupService(func(job *CronJob) (string, error) {
+		close(started)
+		<-release
+		return "ok", nil
+	})
+	defer os.Remove(path)
+
+	at := time.Now().Add(time.Hour).UnixMilli()
+	job, err := cs.AddJob(
+		"one time",
+		CronSchedule{Kind: "at", AtMS: &at},
+		"msg",
+		"telegram",
+		"123",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cs.RunJobNow(job.ID) {
+		t.Fatal("RunJobNow should start an idle job")
+	}
+	<-started
+	if cs.RunJobNow(job.ID) {
+		t.Fatal("RunJobNow should reject an overlapping execution")
+	}
+	close(release)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		got, ok := cs.GetJob(job.ID)
+		if ok && got.State.LastRunAtMS != nil {
+			if got.State.NextRunAtMS == nil || *got.State.NextRunAtMS != at {
+				t.Fatalf("manual run changed next run: %#v", got.State.NextRunAtMS)
+			}
+			if !got.Enabled {
+				t.Fatal("manual run disabled one-time job")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("manual run did not finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestCronService_GetJobReturnsCopy(t *testing.T) {
 	cs, path := setupService(nil)
 	defer os.Remove(path)
